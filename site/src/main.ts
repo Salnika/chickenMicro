@@ -18,6 +18,7 @@ mountTour({
   callHead: need<HTMLElement>('#call-head'),
   intro: need<HTMLElement>('#intro'),
   callBody: need<HTMLElement>('#call-body'),
+  list: need<HTMLElement>('#spot-list'),
 });
 
 mountGuide({

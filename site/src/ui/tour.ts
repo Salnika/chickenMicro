@@ -11,6 +11,7 @@ export interface TourEls {
   callHead: HTMLElement;
   intro: HTMLElement;
   callBody: HTMLElement;
+  list: HTMLElement;
 }
 
 /**
@@ -28,6 +29,8 @@ export function mountTour(els: TourEls): void {
   const lines: SVGLineElement[] = [];
   const dots: HTMLElement[] = [];
   const tags: HTMLElement[] = [];
+  const items: HTMLElement[] = [];
+  let current = -2;
 
   HOTSPOTS.forEach((h, i) => {
     const line = document.createElementNS(SVG_NS, 'line');
@@ -71,9 +74,19 @@ export function mountTour(els: TourEls): void {
     }
     dot.addEventListener('focus', enter);
     dot.addEventListener('blur', leave);
-  });
+    // A tap fires mouseenter and then leaves it hanging, so the marker also
+    // takes click: on a touch screen that is the only way in.
+    dot.addEventListener('click', enter);
 
-  let current = -2;
+    const item = document.createElement('button');
+    item.type = 'button';
+    item.className = 'spot-item';
+    item.textContent = h.glyph ? `${h.glyph} ${h.label}` : h.label;
+    // Tapping the one already open closes it, so the masthead can come back.
+    item.addEventListener('click', () => hover(current === i ? -1 : i));
+    els.list.append(item);
+    items.push(item);
+  });
 
   const hover = (index: number): void => {
     if (index === current) return;
@@ -85,6 +98,7 @@ export function mountTour(els: TourEls): void {
     lines.forEach((l, i) => l.classList.toggle('hot', i === index));
     dots.forEach((d, i) => d.classList.toggle('hot', i === index));
     tags.forEach((t, i) => t.classList.toggle('hot', i === index));
+    items.forEach((t, i) => t.classList.toggle('hot', i === index));
 
     const showing = h !== undefined;
     els.word.hidden = showing;

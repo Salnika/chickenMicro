@@ -87,17 +87,21 @@ code {
 .stage {
   position: fixed;
   inset: 0;
-  display: grid;
-  place-items: center;
   overflow: hidden;
   background: var(--ink);
 }
 
+/* Centred by transform, not by grid or flex: both size the track to an
+   oversized item and then start it at the container's edge, so the frame hung
+   off to one side the moment it was wider than the window — which is every
+   portrait screen, and any desktop window taller than it is wide. */
 .frame {
-  position: relative;
+  position: absolute;
+  left: 50%;
+  top: 50%;
   width: var(--frame-w);
   aspect-ratio: 3 / 2;
-  transform: translateX(calc(var(--pad) / -2));
+  transform: translate(calc(-50% - var(--pad) / 2), -50%);
   transition: transform 0.55s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -1129,6 +1133,102 @@ body[data-mode='tour'] .support {
 
   .nudge {
     display: none;
+  }
+}
+
+/* --------------------------------------------------- the portrait case --
+   Covering the viewport means the frame is sized off the *height* once the
+   screen is taller than 3:2 — on a phone that is a 1266px-wide frame inside
+   390px of screen, and only the middle third of the board survives. Past
+   square, the photo fits the width instead and the flat ink fills what is
+   left, which is no loss: the background was already that colour. The bands
+   keep working untouched, because they are derived from the frame. */
+@media (max-aspect-ratio: 1/1) {
+  /* 130vw, not 100: the board is only 68% of the photo's width, so fitting
+     the photo to the screen would leave the board at two thirds of it and
+     the keycaps too small to aim at. Overshooting crops the mat at the
+     sides — nothing but cutting mat lives there — and the board lands at
+     about 88% of the width. */
+  :root {
+    --frame-w: 130vw;
+  }
+
+  /* Nothing is cropped horizontally any more, so there is nothing to hide a
+     sliding stage behind. */
+  body[data-mode='flash'],
+  body[data-mode='screens'] {
+    --pad: 0px;
+  }
+}
+
+/* ------------------------------------------------------ the tap targets --
+   The pinned tags need the mat around the board to live on, and there is
+   none of it at phone width. The names move into the band instead, where
+   they are a row of buttons rather than six labels overlapping the photo. */
+.spot-list {
+  display: none;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  width: 100%;
+}
+
+.spot-item {
+  padding: 0.5rem 0.75rem;
+  border: 2px solid var(--line);
+  background: transparent;
+  color: var(--paper);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.12s linear, border-color 0.12s linear, color 0.12s linear;
+}
+
+.spot-item.hot {
+  background: var(--red);
+  border-color: var(--red);
+}
+
+@media (max-width: 860px) {
+  .tag-pin {
+    display: none;
+  }
+
+  .spot-list {
+    display: flex;
+  }
+
+  /* Without the tags the arrows point from nowhere, so they go too and the
+     markers carry the whole job. */
+  .arrows {
+    opacity: 0;
+  }
+
+  /* A keycap is about 50px across at this size; a bigger marker would bury
+     the glyph it is pointing at. */
+  .marker {
+    width: 28px;
+    height: 28px;
+    margin: -14px 0 0 -14px;
+  }
+}
+
+@media (max-width: 560px) {
+  /* The bar runs out of room: the repository link is the one thing here that
+     is also in the footer of every other surface. */
+  .src {
+    display: none;
+  }
+
+  .tabs button {
+    padding: 0.4rem 0.6rem;
+    font-size: 0.68rem;
+    letter-spacing: 0.1em;
+  }
+
+  .mark {
+    font-size: 0.92rem;
   }
 }
 
