@@ -1,0 +1,155 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ChickenMicro — flash it, learn it</title>
+    <meta
+      name="description"
+      content="Flash the ChickenMicro firmware straight from your browser, and a guided tour of every screen the e-ink box can draw."
+    />
+    <meta name="color-scheme" content="dark" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+
+    <meta property="og:title" content="ChickenMicro" />
+    <meta
+      property="og:description"
+      content="A physical desk terminal for Claude Desktop. Flash it from this page, then learn what every screen means."
+    />
+    <meta property="og:image" content="/board.jpg" />
+    <meta property="og:type" content="website" />
+  </head>
+
+  <!-- One screen, no scroll. data-mode on <body> is the whole state machine:
+       tour | flash | screens. -->
+  <body data-mode="tour">
+    <!-- ========================================================== STAGE == -->
+    <div class="stage">
+      <div class="frame" id="frame">
+        <img
+          src="/board.jpg"
+          alt="A ChickenMicro board seen from above: an e-ink panel showing the Connecting screen, a joystick, and four keycaps marked cross, square, check and return."
+          width="1494"
+          height="996"
+          fetchpriority="high"
+        />
+        <div class="spotlight" id="spotlight" aria-hidden="true"></div>
+        <svg class="arrows" viewBox="0 0 100 66.667" preserveAspectRatio="none" aria-hidden="true"></svg>
+        <div class="markers"></div>
+      </div>
+    </div>
+    <div class="scrim" aria-hidden="true"></div>
+
+    <!-- ============================================================ BAR == -->
+    <header class="bar">
+      <a class="mark" href="#" data-go="tour">Chicken<b>Micro</b></a>
+      <nav class="tabs">
+        <button type="button" data-go="tour">Tour</button>
+        <button type="button" data-go="flash">Flash</button>
+        <button type="button" data-go="screens">Screens</button>
+      </nav>
+      <a class="src" href="https://github.com/Salnika/chickenMicro">GitHub ↗</a>
+    </header>
+
+    <!-- =========================================================== TOUR == -->
+    <!-- Top band: the wordmark, replaced by the part being called out. -->
+    <div class="band band-top">
+      <h1 class="word" id="word">Chicken</h1>
+      <div class="call-head" id="call-head" hidden></div>
+    </div>
+
+    <!-- Bottom band: the lede, replaced by the call-out body. -->
+    <div class="band band-bottom">
+      <div class="intro" id="intro">
+        <h1 class="word">Micro</h1>
+        <div class="intro-text">
+          <p>
+            A physical desk terminal for Claude&nbsp;Desktop. The box shows what Claude is
+            doing. Four keys answer it.
+          </p>
+          <div class="cta">
+            <button type="button" class="btn btn-solid" data-go="flash">Flash my board</button>
+            <button type="button" class="btn" data-go="screens">See the screens</button>
+          </div>
+          <p class="nudge">Point at a marker on the board.</p>
+        </div>
+      </div>
+
+      <div class="call-body" id="call-body" hidden></div>
+    </div>
+
+    <!-- ========================================================== PANEL == -->
+    <aside class="panel" id="panel" aria-hidden="true">
+      <!-- ---- flash ---- -->
+      <section class="pane" data-pane="flash">
+        <header class="pane-head">
+          <h2>Flash</h2>
+          <p>The browser writes the image the repo's CI builds out of <code>esp32/</code>.</p>
+        </header>
+
+        <div class="pane-scroll">
+          <div class="detector" id="detector"></div>
+
+          <p class="field-label">Build</p>
+          <div class="boards" id="boards"></div>
+          <details class="tools">
+            <summary>Other builds</summary>
+            <div class="boards" id="boards-tools"></div>
+          </details>
+
+          <label class="erase">
+            <input type="checkbox" id="erase-all" />
+            <span>
+              Erase the whole flash first
+              <em>Wipes stored one-time-code accounts.</em>
+            </span>
+          </label>
+
+          <p class="flash-error" id="flash-error" hidden></p>
+
+          <details class="log-wrap" id="log-wrap" hidden>
+            <summary>Serial log</summary>
+            <pre class="log" id="log"></pre>
+          </details>
+
+          <details class="tools">
+            <summary>It will not connect</summary>
+            <p class="hint">
+              Hold <strong>BOOT</strong>, tap <strong>EN/RESET</strong>, release BOOT, then
+              flash. An empty chooser usually means a missing USB-UART driver — CP2102 works out
+              of the box, CH340 and CH9102 want
+              <a href="https://www.wch-ic.com/downloads/CH34XSER_MAC_ZIP.html">WCH's</a>.
+              Use a <strong>data</strong> cable.
+            </p>
+          </details>
+        </div>
+
+        <footer class="pane-foot">
+          <div class="progress" id="progress" hidden>
+            <div class="bar-track"><i></i></div>
+            <p class="progress-msg"></p>
+          </div>
+          <button class="btn btn-solid btn-big" id="flash-btn" disabled>Flash</button>
+        </footer>
+      </section>
+
+      <!-- ---- screens ---- -->
+      <section class="pane" data-pane="screens">
+        <header class="pane-head">
+          <h2>Screens</h2>
+          <p>Every screen the box draws, and the keys that are live on it.</p>
+        </header>
+        <div class="pane-scroll" id="screen-host"></div>
+        <footer class="pane-foot">
+          <button type="button" class="step-btn" id="s-prev" aria-label="Previous screen">←</button>
+          <p class="counter" id="s-count"></p>
+          <button type="button" class="step-btn" id="s-next" aria-label="Next screen">→</button>
+        </footer>
+      </section>
+    </aside>
+
+    <p class="support" id="hero-support"></p>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

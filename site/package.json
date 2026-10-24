@@ -1,0 +1,21 @@
+{
+  "name": "chickenmicro-site",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Web flasher and visual guide for ChickenMicro, deployed to GitHub Pages",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "firmware": "bash scripts/build-firmware.sh"
+  },
+  "devDependencies": {
+    "@types/w3c-web-serial": "^1.0.9",
+    "typescript": "~5.9.3",
+    "vite": "^8.3.5"
+  },
+  "dependencies": {
+    "esptool-js": "^0.7.0"
+  }
+}

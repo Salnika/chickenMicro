@@ -254,6 +254,36 @@ so each tile is life-size:
 
 ---
 
+## Flash it from the browser
+
+[**salnika.github.io/chickenMicro**](https://salnika.github.io/chickenMicro/)
+writes the firmware over USB with no toolchain and no checkout, and annotates a
+photo of the board with what every part does. It needs a Chromium browser —
+Web Serial is how the page reaches the board.
+
+The images it flashes are not committed: the Pages workflow builds every board
+variant out of `esp32/` and merges each into one image before the site is
+deployed, so what the page writes is always what this repository builds. The
+same script runs locally:
+
+```bash
+site/scripts/build-firmware.sh
+```
+
+```bash
+npm install --prefix site
+```
+
+```bash
+npm run dev --prefix site
+```
+
+The site lives in [`site/`](site/) — Vite and TypeScript, one fixed screen, no
+framework. [`site/photo/README.md`](site/photo/README.md) explains how the
+board photo is cropped and what to redo if it is replaced.
+
+---
+
 ## Install
 
 From an empty desk to a working box, in five stages. Each one links to the page

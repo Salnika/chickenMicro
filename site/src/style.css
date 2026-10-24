@@ -1,0 +1,1157 @@
+/* ============================================================ tokens ==
+   Flat only. No gradient, no shadow, no blur in this file — every surface
+   is one solid colour with a hard 2px edge. */
+:root {
+  --ink: #0a0a0a;
+  --ink-2: #141414;
+  --line: #2e2e2e;
+  --paper: #f4f1e8;
+  --grey: #8d8d86;
+
+  --red: #e5342b;
+  --green: #19a974;
+  --amber: #f0a500;
+  --blue: #3d8bdd;
+
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;
+  --sans: "Helvetica Neue", Helvetica, Inter, -apple-system, BlinkMacSystemFont, Arial, sans-serif;
+
+  --bar-h: 48px;
+  /* The board is 70% of the photo's width, so the panel has to leave at least
+     that much visible or the stage shift crops it. 380px keeps it whole from
+     about 1340px of viewport up. */
+  --panel-w: min(380px, 40vw);
+
+  /* board.jpg is cropped so the board's own centre IS the image centre, which
+     is what makes `place-items: center` enough — there is no offset to tune.
+     Within it the board spans 17.77–82.23% vertically, and that is where the
+     two bands get their height, so text never lands on the board. */
+  --frame-w: max(100vw, 150svh);
+  --frame-h: calc(var(--frame-w) / 1.5);
+  --gap-y: calc((100svh - var(--frame-h)) / 2);
+  --board-top: calc(var(--gap-y) + var(--frame-h) * 0.1777);
+  --board-bottom: calc(var(--gap-y) + var(--frame-h) * 0.8223);
+
+  /* Width taken by the panel. The stage slides half of it so the board stays
+     centred in what is left; the strip it uncovers hides under the panel. */
+  --pad: 0px;
+}
+
+body[data-mode='flash'],
+body[data-mode='screens'] {
+  --pad: var(--panel-w);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  margin: 0;
+  background: var(--ink);
+  color: var(--paper);
+  font-family: var(--sans);
+  font-size: 16px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+img {
+  display: block;
+}
+
+a {
+  color: inherit;
+}
+
+button {
+  font: inherit;
+}
+
+code {
+  font-family: var(--mono);
+  font-size: 0.86em;
+  border: 1px solid currentColor;
+  padding: 0 0.3em;
+}
+
+/* ============================================================= stage == */
+.stage {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  background: var(--ink);
+}
+
+.frame {
+  position: relative;
+  width: var(--frame-w);
+  aspect-ratio: 3 / 2;
+  transform: translateX(calc(var(--pad) / -2));
+  transition: transform 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.frame img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+/* Flat wash, never a gradient. */
+/* The resting wash over the whole photo. While a part is being described the
+   spotlight takes over instead, so the two never stack. */
+.scrim {
+  position: fixed;
+  inset: 0;
+  background: var(--ink);
+  opacity: 0.38;
+  pointer-events: none;
+  transition: opacity 0.25s linear;
+}
+
+body.calling .scrim {
+  opacity: 0;
+}
+
+/* A hole, not a highlight: the rectangle itself is untouched photo, and the
+   spread shadow darkens everything outside it. One flat colour, hard edge —
+   no gradient anywhere. */
+.spotlight {
+  position: absolute;
+  box-shadow: 0 0 0 200vmax #0a0a0ac4;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s linear, left 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    top 0.3s cubic-bezier(0.22, 1, 0.36, 1), width 0.3s cubic-bezier(0.22, 1, 0.36, 1),
+    height 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+body.calling .spotlight {
+  opacity: 1;
+}
+
+/* ---------------------------------------------------- arrows & markers */
+.arrows {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  color: var(--red);
+}
+
+/* Every arrow is drawn once on load and then stays. Pointing at a part only
+   changes its weight — nothing ever disappears. */
+/* Red, not white: the arrow has to read on the dark mat AND on the white
+   e-ink panel it points into. */
+.arrows line {
+  stroke: var(--red);
+  stroke-width: 0.26;
+  animation: ink 0.5s linear backwards;
+  transition: stroke-width 0.15s linear;
+}
+
+.arrows line.hot {
+  stroke-width: 0.5;
+}
+
+@keyframes ink {
+  from {
+    opacity: 0;
+  }
+}
+
+.markers {
+  position: absolute;
+  inset: 0;
+}
+
+/* Outside the tour the board is only a backdrop, and half the tags would sit
+   off-screen anyway once the stage slides. */
+body:not([data-mode='tour']) .arrows,
+body:not([data-mode='tour']) .markers {
+  opacity: 0;
+  transition: opacity 0.3s linear;
+  pointer-events: none;
+}
+
+/* A hard crosshair, not a pin. */
+.marker {
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  margin: -13px 0 0 -13px;
+  border: 2px solid var(--red);
+  cursor: crosshair;
+  animation: ink 0.5s linear backwards;
+  transition: transform 0.18s cubic-bezier(0.22, 1, 0.36, 1), background 0.15s linear;
+}
+
+.marker::before,
+.marker::after {
+  content: '';
+  position: absolute;
+  background: var(--red);
+}
+
+.marker::before {
+  left: 50%;
+  top: -10px;
+  bottom: -10px;
+  width: 2px;
+  margin-left: -1px;
+}
+
+.marker::after {
+  top: 50%;
+  left: -10px;
+  right: -10px;
+  height: 2px;
+  margin-top: -1px;
+}
+
+.marker.hot {
+  transform: scale(1.3);
+  background: var(--red);
+}
+
+.tag-pin {
+  position: absolute;
+  padding: 0.35rem 0.7rem;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: clamp(0.6rem, 0.95vw, 0.78rem);
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  cursor: crosshair;
+  animation: ink 0.5s linear backwards;
+  transition: background 0.15s linear, color 0.15s linear;
+}
+
+.tag-pin.hot {
+  background: var(--red);
+  color: var(--paper);
+}
+
+.tag-pin[data-align='left'] {
+  transform: translate(0, -50%);
+}
+.tag-pin[data-align='right'] {
+  transform: translate(-100%, -50%);
+}
+.tag-pin[data-align='center'] {
+  transform: translate(-50%, -50%);
+}
+
+/* =============================================================== bar == */
+.bar {
+  position: fixed;
+  z-index: 5;
+  top: 0;
+  left: 0;
+  right: var(--pad);
+  height: var(--bar-h);
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  padding-inline: clamp(1rem, 3vw, 2.2rem);
+  transition: right 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.mark {
+  font-size: 1.05rem;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  text-decoration: none;
+}
+
+.mark b {
+  color: var(--red);
+}
+
+.tabs {
+  display: flex;
+  gap: 0.4rem;
+  margin-left: auto;
+}
+
+.tabs button {
+  padding: 0.45rem 0.9rem;
+  border: 2px solid transparent;
+  background: transparent;
+  color: var(--paper);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.12s linear, color 0.12s linear, border-color 0.12s linear;
+}
+
+.tabs button:hover {
+  border-color: var(--paper);
+}
+
+.tabs button.on {
+  background: var(--red);
+  border-color: var(--red);
+}
+
+.src {
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  text-decoration: none;
+  color: var(--grey);
+}
+
+.src:hover {
+  color: var(--paper);
+}
+
+/* ============================================================= bands == */
+.band {
+  position: fixed;
+  z-index: 4;
+  left: 0;
+  right: var(--pad);
+  padding-inline: clamp(1rem, 3vw, 2.2rem);
+  display: flex;
+  transition: right 0.55s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.3s linear;
+}
+
+body:not([data-mode='tour']) .band {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.band-top {
+  top: var(--bar-h);
+  height: calc(var(--board-top) - var(--bar-h));
+  align-items: center;
+}
+
+.band-bottom {
+  top: var(--board-bottom);
+  bottom: 0;
+  align-items: center;
+  gap: clamp(1rem, 3vw, 2.5rem);
+}
+
+/* --------------------------------------------------------- big type -- */
+.word {
+  margin: 0;
+  /* Sized against the band, not the viewport: the band is what it has to
+     fit inside, and the band is what is left over by the board. */
+  font-size: clamp(1.8rem, 9vh, 5.5rem);
+  line-height: 0.82;
+  letter-spacing: -0.045em;
+  font-weight: 800;
+}
+
+.intro {
+  display: flex;
+  align-items: center;
+  gap: clamp(1rem, 3vw, 2.5rem);
+  width: 100%;
+}
+
+.intro[hidden] {
+  display: none;
+}
+
+.intro-text {
+  max-width: 44ch;
+}
+
+.intro-text p {
+  margin: 0 0 0.9rem;
+  font-size: clamp(0.85rem, 1.5vh, 1.05rem);
+  color: var(--paper);
+}
+
+.cta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+/* ------------------------------------------------------- the call-out */
+.call-head {
+  display: flex;
+  align-items: baseline;
+  gap: 1.2rem;
+  animation: cut 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.call-head[hidden] {
+  display: none;
+}
+
+.call-num {
+  font-family: var(--mono);
+  font-size: clamp(0.8rem, 1.6vh, 1.05rem);
+  letter-spacing: 0.18em;
+  color: var(--red);
+}
+
+.call-glyph {
+  color: var(--red);
+  margin-right: 0.25em;
+}
+
+.call-body {
+  max-width: 54ch;
+  animation: cut 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.call-body[hidden] {
+  display: none;
+}
+
+.call-body p {
+  margin: 0;
+  font-size: clamp(0.85rem, 1.6vh, 1.05rem);
+}
+
+.call-pin {
+  display: inline-block;
+  margin-top: 0.7rem;
+  padding: 0.2rem 0.55rem;
+  border: 2px solid var(--red);
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+  color: var(--red);
+}
+
+@keyframes cut {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+}
+
+/* ------------------------------------------------------------ nudge -- */
+.nudge {
+  margin: 0.7rem 0 0;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--grey);
+}
+
+.step-btn {
+  width: 42px;
+  height: 42px;
+  border: 2px solid var(--paper);
+  background: transparent;
+  color: var(--paper);
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background 0.12s linear, color 0.12s linear;
+}
+
+.step-btn:hover:not(:disabled) {
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.step-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/* =========================================================== buttons == */
+.btn {
+  display: inline-block;
+  padding: 0.7rem 1.3rem;
+  border: 2px solid var(--paper);
+  background: transparent;
+  color: var(--paper);
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.12s linear, color 0.12s linear;
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.btn-solid {
+  background: var(--red);
+  border-color: var(--red);
+}
+
+.btn-solid:hover:not(:disabled) {
+  background: var(--paper);
+  border-color: var(--paper);
+  color: var(--ink);
+}
+
+.btn-big {
+  width: 100%;
+  padding: 1rem 1.5rem;
+  font-size: 0.9rem;
+}
+
+.btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+/* ============================================================= panel == */
+.panel {
+  position: fixed;
+  z-index: 6;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: var(--panel-w);
+  background: var(--ink);
+  border-left: 2px solid var(--line);
+  transform: translateX(100%);
+  transition: transform 0.55s cubic-bezier(0.22, 1, 0.36, 1);
+  display: flex;
+  flex-direction: column;
+}
+
+body[data-mode='flash'] .panel,
+body[data-mode='screens'] .panel {
+  transform: translateX(0);
+}
+
+.pane {
+  display: none;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+body[data-mode='flash'] .pane[data-pane='flash'],
+body[data-mode='screens'] .pane[data-pane='screens'] {
+  display: flex;
+}
+
+.pane-head {
+  padding: 1.4rem 1.4rem 1rem;
+  border-bottom: 2px solid var(--line);
+}
+
+.pane-head h2 {
+  margin: 0;
+  font-size: clamp(1.8rem, 4vh, 2.6rem);
+  line-height: 0.9;
+  letter-spacing: -0.04em;
+  font-weight: 800;
+}
+
+.pane-head p {
+  margin: 0.5rem 0 0;
+  font-size: 0.8rem;
+  color: var(--grey);
+}
+
+/* The only scroll on the page, and only inside the panel. */
+.pane-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 1.2rem 1.4rem;
+}
+
+.pane-foot {
+  padding: 1rem 1.4rem;
+  border-top: 2px solid var(--line);
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+}
+
+.pane-foot .progress {
+  flex: 1;
+}
+
+.counter {
+  flex: 1;
+  margin: 0;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--grey);
+}
+
+.field-label {
+  margin: 1.2rem 0 0.5rem;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--grey);
+}
+
+/* ---------------------------------------------------- board detection */
+.detector {
+  display: flex;
+  align-items: center;
+  gap: 0.8rem;
+  padding: 0.8rem 0.9rem;
+  border: 2px solid var(--line);
+}
+
+.detector.is-detected {
+  border-color: var(--green);
+}
+
+.detector.is-unsupported {
+  border-color: var(--amber);
+}
+
+.led {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  background: var(--grey);
+}
+
+.detector.is-detected .led {
+  background: var(--green);
+  animation: beat 1.8s steps(1, end) infinite;
+}
+
+.detector.is-busy .led {
+  background: var(--amber);
+  animation: beat 0.6s steps(1, end) infinite;
+}
+
+.detector.is-unsupported .led {
+  background: var(--amber);
+}
+
+@keyframes beat {
+  50% {
+    opacity: 0.2;
+  }
+}
+
+.detector-text {
+  min-width: 0;
+}
+
+.detector-text strong {
+  display: block;
+  font-size: 0.85rem;
+}
+
+.detector-text span {
+  display: block;
+  font-size: 0.74rem;
+  color: var(--grey);
+}
+
+/* --------------------------------------------------------- the boards */
+.boards {
+  display: grid;
+  border: 2px solid var(--line);
+}
+
+.board {
+  position: relative;
+  display: block;
+  text-align: left;
+  padding: 0.75rem 0.9rem;
+  border: 0;
+  border-bottom: 2px solid var(--line);
+  background: transparent;
+  color: var(--paper);
+  cursor: pointer;
+  transition: background 0.12s linear;
+}
+
+.board:last-child {
+  border-bottom: 0;
+}
+
+.board:hover {
+  background: var(--ink-2);
+}
+
+.board[aria-pressed='true'] {
+  background: var(--red);
+}
+
+.board[aria-pressed='true'] span,
+.board[aria-pressed='true'] .chipname,
+.board[aria-pressed='true'] em {
+  color: var(--paper);
+}
+
+.board strong {
+  display: block;
+  font-size: 0.86rem;
+  margin-bottom: 0.15rem;
+}
+
+.board span {
+  display: block;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--grey);
+}
+
+.board em {
+  display: block;
+  margin-top: 0.35rem;
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  color: var(--amber);
+}
+
+.board .chipname {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.9rem;
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  letter-spacing: 0.1em;
+  color: var(--grey);
+}
+
+.tools {
+  margin-top: 0.8rem;
+}
+
+.tools summary {
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--grey);
+}
+
+.tools .hint {
+  margin: 0.7rem 0 0;
+  font-size: 0.76rem;
+  color: var(--grey);
+}
+
+.erase {
+  display: flex;
+  gap: 0.55rem;
+  align-items: flex-start;
+  margin: 1.2rem 0 0;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.erase em {
+  display: block;
+  font-style: normal;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  color: var(--amber);
+}
+
+/* -------------------------------------------------------- progress --- */
+.progress .bar-track {
+  height: 8px;
+  border: 2px solid var(--line);
+  overflow: hidden;
+}
+
+.progress .bar-track i {
+  display: block;
+  height: 100%;
+  width: 0%;
+  background: var(--red);
+  transition: width 0.25s linear;
+}
+
+.progress.indeterminate .bar-track i {
+  width: 30% !important;
+  animation: sweep 1.1s linear infinite;
+}
+
+@keyframes sweep {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(400%);
+  }
+}
+
+.progress.done .bar-track i {
+  background: var(--green);
+}
+
+.progress-msg {
+  margin: 0.4rem 0 0;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  color: var(--grey);
+}
+
+.flash-error {
+  margin: 1.2rem 0 0;
+  padding: 0.8rem 0.9rem;
+  border: 2px solid var(--red);
+  font-size: 0.78rem;
+}
+
+.flash-error b {
+  display: block;
+  margin-bottom: 0.3rem;
+  color: var(--red);
+}
+
+.log-wrap {
+  margin-top: 1rem;
+}
+
+.log-wrap summary {
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--grey);
+}
+
+.log {
+  max-height: 160px;
+  overflow: auto;
+  margin: 0.6rem 0 0;
+  padding: 0.7rem;
+  border: 2px solid var(--line);
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  line-height: 1.6;
+  color: var(--grey);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ====================================================== screen guide == */
+.screen-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.9rem;
+}
+
+.screen-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+
+.screen-head h3 {
+  margin: 0;
+  font-size: 1.25rem;
+  letter-spacing: -0.02em;
+  font-weight: 800;
+}
+
+.screen-head .tag {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--red);
+}
+
+.screen-card > p {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.5;
+  color: var(--grey);
+}
+
+.screen-note {
+  margin: 0;
+  padding: 0.7rem 0.8rem;
+  border-left: 3px solid var(--red);
+  font-size: 0.74rem !important;
+  color: var(--paper) !important;
+}
+
+/* ---- the e-ink panel, 250x122 exactly ---- */
+.panel-mock {
+  aspect-ratio: 250 / 122;
+  width: 100%;
+  padding: 7px 9px;
+  display: flex;
+  flex-direction: column;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: clamp(7px, 3.1cqw, 11px);
+  line-height: 1.3;
+  container-type: inline-size;
+}
+
+.panel-mock .p-title {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6em;
+  font-size: 0.82em;
+  letter-spacing: 0.05em;
+  border-bottom: 1.5px solid var(--ink);
+  padding-bottom: 2px;
+  margin-bottom: 4px;
+}
+
+.panel-mock .p-wordmark {
+  text-align: center;
+  font-size: 1.5em;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  border-bottom: 1.5px solid var(--ink);
+  padding-bottom: 3px;
+  margin-bottom: 6px;
+}
+
+.panel-mock .p-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  overflow: hidden;
+}
+
+.panel-mock .l-big {
+  font-size: 1.8em;
+  font-weight: 700;
+  line-height: 1.08;
+  letter-spacing: -0.01em;
+}
+
+.panel-mock .l-small {
+  font-size: 0.86em;
+}
+
+.panel-mock .l-quote {
+  border-left: 2px solid var(--ink);
+  padding-left: 4px;
+}
+
+.panel-mock .l-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.6em;
+}
+
+.panel-mock .l-row.sel {
+  outline: 1.5px solid var(--ink);
+  outline-offset: 1px;
+}
+
+.panel-mock .badge {
+  display: inline-block;
+  border: 1.5px solid var(--ink);
+  padding: 0 3px;
+  margin-right: 4px;
+  font-size: 0.82em;
+  letter-spacing: 0.05em;
+}
+
+.panel-mock .p-legend {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.4em;
+  border-top: 1.5px solid var(--ink);
+  padding-top: 3px;
+  margin-top: 4px;
+  font-size: 0.82em;
+}
+
+.panel-mock .p-legend span {
+  flex: 1;
+  text-align: center;
+  white-space: nowrap;
+  transition: background 0.12s linear, color 0.12s linear;
+}
+
+.panel-mock .p-legend span.lit {
+  background: var(--ink);
+  color: var(--paper);
+}
+
+.panel-mock .p-legend span:empty::before {
+  content: '\00a0';
+}
+
+.loader {
+  display: flex;
+  gap: 4px;
+  justify-content: center;
+  margin-top: 3px;
+}
+
+.loader i {
+  width: 11px;
+  height: 7px;
+  border: 1.5px solid var(--ink);
+  animation: loader-step 2.2s steps(1, end) infinite;
+  animation-delay: calc(var(--i) * 0.44s);
+}
+
+@keyframes loader-step {
+  0%,
+  19% {
+    background: var(--ink);
+  }
+  20%,
+  100% {
+    background: transparent;
+  }
+}
+
+/* ---- the four keycaps ---- */
+.keyrow {
+  display: flex;
+  border: 2px solid var(--line);
+}
+
+.keycap {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.15rem;
+  padding: 0.5rem 0.2rem;
+  border-right: 2px solid var(--line);
+  font-family: var(--mono);
+  font-size: 0.56rem;
+  letter-spacing: 0.08em;
+  color: #55554f;
+  transition: background 0.12s linear, color 0.12s linear;
+}
+
+.keycap:last-child {
+  border-right: 0;
+}
+
+.keycap .k-glyph {
+  font-size: 1.05rem;
+  line-height: 1;
+}
+
+.keycap.live {
+  color: var(--paper);
+}
+
+.keycap.live:hover {
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.keycap.live.k-deny:hover { background: var(--red); color: var(--paper); }
+.keycap.live.k-stop:hover { background: var(--amber); color: var(--ink); }
+.keycap.live.k-approve:hover { background: var(--green); color: var(--paper); }
+.keycap.live.k-action:hover { background: var(--blue); color: var(--paper); }
+
+/* ====================================================== support note == */
+.support {
+  position: fixed;
+  z-index: 5;
+  left: clamp(1rem, 3vw, 2.2rem);
+  bottom: 0.7rem;
+  margin: 0;
+  max-width: 46ch;
+  font-family: var(--mono);
+  font-size: 0.66rem;
+  line-height: 1.5;
+  color: var(--grey);
+  pointer-events: none;
+}
+
+body[data-mode='tour'] .support {
+  display: none;
+}
+
+.support.warn {
+  color: var(--amber);
+}
+
+/* ========================================================= responsive == */
+@media (max-width: 760px), (max-height: 560px) {
+  :root {
+    --panel-w: 100vw;
+    --bar-h: 48px;
+  }
+
+  /* The panel takes the whole screen, so the stage does not move. */
+  body[data-mode='flash'],
+  body[data-mode='screens'] {
+    --pad: 0px;
+  }
+
+  .bar,
+  .band {
+    right: 0;
+  }
+
+  body:not([data-mode='tour']) .bar {
+    z-index: 7;
+  }
+
+  .intro {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.5rem;
+  }
+
+  .word {
+    font-size: clamp(1.8rem, 8vh, 3.4rem);
+  }
+
+  .tour-nav {
+    margin-left: 0;
+  }
+
+  .band-bottom {
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 0.6rem;
+  }
+}
+
+/* ===================================================== reduced motion == */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
