@@ -44,7 +44,7 @@ const BRIDGES: ReadonlyArray<{
   // bridge chip in between. 1001 is the ROM USB-Serial/JTAG peripheral and is
   // shared by the S3, C3, C6 and H2 alike, so it names no chip — only the
   // chip esptool reports once connected can do that.
-  { vid: 0x303a, pid: 0x1001, label: 'Espressif USB-Serial/JTAG' },
+  { vid: 0x303a, pid: 0x1001, label: 'Chicken Micro board' },
   { vid: 0x303a, pid: 0x0002, label: 'Espressif USB-OTG', impliesChip: 'ESP32-S2' },
   { vid: 0x303a, label: 'Espressif native USB' },
 ];

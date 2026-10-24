@@ -20,7 +20,7 @@ import { encode } from '../src/protocol/frames.js';
 import { PermissionGate } from '../src/session/permissionGate.js';
 import { SessionCoordinator, VERSION } from '../src/session/sessionCoordinator.js';
 import { SessionTracker } from '../src/session/sessionTracker.js';
-import { availablePorts } from '../src/transport/portDiscovery.js';
+import { describedPorts } from '../src/transport/portDiscovery.js';
 import { SerialTransport } from '../src/transport/serialTransport.js';
 import { StdoutTransport } from '../src/transport/stdoutTransport.js';
 import { FakeAccessibilitySource } from '../src/simulation/fixtures.js';
@@ -146,8 +146,8 @@ function runUntilInterrupted(onShutdown) {
 
 // --- Commands ---------------------------------------------------------------
 
-function commandPorts() {
-  const ports = availablePorts();
+async function commandPorts() {
+  const ports = await describedPorts();
   if (ports.length === 0) {
     console.log('No USB-serial port found.');
     console.log(`
@@ -440,7 +440,7 @@ async function commandDoctor() {
     console.log('     not there yet — `claude-remote run` starts it');
   }
 
-  const ports = availablePorts();
+  const ports = await describedPorts();
   if (ports.length > 0) {
     console.log('[ok] serial port');
     console.log(`     ${ports[0].path} — ${ports[0].hint}`);
@@ -461,7 +461,7 @@ async function commandDoctor() {
 
 let status;
 switch (args.command) {
-  case 'ports': status = commandPorts(); break;
+  case 'ports': status = await commandPorts(); break;
   case 'dump': status = await commandDump(); break;
   case 'sessions': status = await commandSessions(); break;
   case 'run': status = await commandRun(); break;
