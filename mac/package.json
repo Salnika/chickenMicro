@@ -33,7 +33,7 @@
   "main": "src/index.js",
   "scripts": {
     "start": "node bin/claude-remote.js run",
-    "test": "node --test \"test/**/*.test.js\"",
+    "test": "node --test",
     "doctor": "node bin/claude-remote.js doctor"
   },
   "dependencies": {

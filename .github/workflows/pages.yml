@@ -48,9 +48,12 @@ jobs:
       - name: Build and merge the firmware images
         run: site/scripts/build-firmware.sh
 
+      # 22, not 20: Vite 8 wants ^20.19 || >=22.12, and this only builds the
+      # site. The daemon's own job stays on 20, which is what its engines
+      # field claims to support.
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: npm
           cache-dependency-path: site/package-lock.json
 
