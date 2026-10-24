@@ -1,0 +1,84 @@
+name: Bug report
+description: Something does not work — the box, the daemon, or the link between them
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filing: `docs/troubleshooting.md` covers most of what goes wrong,
+        and `claude-remote doctor` plus `claude-remote sessions` answer a lot of
+        it without any hardware involved.
+
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: And what you expected instead.
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to get there
+      description: The shortest sequence that reproduces it.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: where
+    attributes:
+      label: Which side
+      options:
+        - Mac daemon
+        - Firmware / the box
+        - The link between them
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: board
+    attributes:
+      label: Board
+      description: And the panel, if it is not the GDEY0213Z98.
+      placeholder: ESP32 DevKit V1
+    validations:
+      required: true
+
+  - type: input
+    id: claude-version
+    attributes:
+      label: Claude Desktop version
+      description: >
+        Claude Desktop's Accessibility tree has no stable identifiers, so
+        detection bugs are version-specific. Leave blank if Claude is not
+        involved.
+      placeholder: "0.14.2"
+
+  - type: input
+    id: macos
+    attributes:
+      label: macOS and Node version
+      placeholder: "macOS 15.3, Node 22.18.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: >
+        `claude-remote doctor`, and the relevant lines from
+        `~/Library/Logs/claude-remote/claude-remote.log`. For anything where the
+        box does not see a permission, `claude-remote dump --filter button` is
+        the one that matters.
+      render: shell
+
+  - type: checkboxes
+    id: tests
+    attributes:
+      label: Test suites
+      options:
+        - label: "`cd mac && npm test` passes"
+        - label: "`cd esp32 && pio test -e native` passes"

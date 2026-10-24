@@ -1,0 +1,657 @@
+import { LogTag } from '../log.js';
+import {
+  DEFAULT_APPROVE_DELAY_MS,
+  MAX_MISSED_PINGS,
+  OTP_CLEAR_GRACE_MS,
+  PING_INTERVAL_MS,
+  TIME_SYNC_INTERVAL_MS,
+} from '../protocol/constants.js';
+import { ClaudeState, DeviceAction } from '../protocol/enums.js';
+import { decodeInbound, encode, redactForLog } from '../protocol/frames.js';
+import { systemClipboard } from '../system/clipboard.js';
+import { DEFAULT_TREE_DEPTH } from '../accessibility/axNode.js';
+import { PermissionGate } from './permissionGate.js';
+import { EMPTY_SNAPSHOT, SessionTracker } from './sessionTracker.js';
+
+export const VERSION = '1.1.0';
+
+/**
+ * How long Claude is given to take down a dialog after its button was pressed.
+ *
+ * Past this, the press is worth reporting: the button answered AXPress with
+ * success, so the only way to tell it did nothing is that the request is still
+ * there. Long enough that a busy app is not accused of it.
+ */
+const PRESS_SETTLE_MS = 1500;
+
+/**
+ * Wires Accessibility to the device and back.
+ *
+ * Single-threaded by contract, which Node gives for free: every entry point
+ * runs on the event loop, so there is no window in which a snapshot refresh and
+ * an inbound approve interleave. That is what makes the permission gate's
+ * reasoning sound.
+ */
+export class SessionCoordinator {
+  #transport;
+  #source;
+  #tracker;
+  #gate;
+  #log;
+  #now;
+  #treeDepth;
+
+  /**
+   * Last frames actually mirrored to the device, used to send diffs only —
+   * e-ink must not be redrawn for unchanged content.
+   */
+  #mirrored = null;
+  /** Last interpreted view, so a focus change can be answered without a re-read. */
+  #view = null;
+
+  #pingSeq = 0;
+  #missedPings = 0;
+  #pingTimer = null;
+  #timeTimer = null;
+
+  /** A verdict pressed and not yet seen to clear, so a press that did nothing is said aloud. */
+  #awaitingClear = null;
+
+  #clipboard;
+  #timers;
+  /** The one-time code last put on the clipboard, until it is wiped. */
+  #clipboardCode = null;
+  #clipboardTimer = null;
+
+  constructor({
+    transport,
+    source,
+    tracker = new SessionTracker(),
+    gate = new PermissionGate(),
+    log,
+    appName = 'claude-remote',
+    appVersion = VERSION,
+    treeDepth = DEFAULT_TREE_DEPTH,
+    now = () => Date.now(),
+    clipboard = systemClipboard,
+    timers = { setTimeout, clearTimeout },
+  }) {
+    this.#clipboard = clipboard;
+    this.#timers = timers;
+    this.#transport = transport;
+    this.#source = source;
+    this.#tracker = tracker;
+    this.#gate = gate;
+    this.#log = log;
+    this.appName = appName;
+    this.appVersion = appVersion;
+    this.#treeDepth = treeDepth;
+    this.#now = now;
+  }
+
+  // --- Lifecycle -------------------------------------------------------------
+
+  start() {
+    this.#transport.onLine = (line) => this.handleInbound(line);
+    this.#transport.onConnect = () => this.#handleConnect();
+    this.#transport.start();
+
+    this.#pingTimer = setInterval(() => this.#sendPing(), PING_INTERVAL_MS);
+    this.#pingTimer.unref?.();
+    // The device carries the clock forward on its own crystal; a minute's drift
+    // is milliseconds, far inside a 30 s code window.
+    this.#timeTimer = setInterval(() => this.#sendTime(), TIME_SYNC_INTERVAL_MS);
+    this.#timeTimer.unref?.();
+  }
+
+  stop() {
+    if (this.#pingTimer !== null) {
+      clearInterval(this.#pingTimer);
+      this.#pingTimer = null;
+    }
+    if (this.#timeTimer !== null) {
+      clearInterval(this.#timeTimer);
+      this.#timeTimer = null;
+    }
+    // Leaving: take a still-live code off the clipboard now rather than never.
+    if (this.#clipboardCode !== null) this.#wipeClipboardCode();
+    this.#transport.stop();
+  }
+
+  #handleConnect() {
+    this.#log.info(LogTag.session, 'device connected, resynchronising');
+    this.#missedPings = 0;
+    this.#awaitingClear = null;
+    this.send(encode.hello(this.appName, this.appVersion, this.#gate.approveDelayMs));
+    this.#sendTime();
+    // Force a full resend: the device has just booted or reconnected and knows
+    // nothing.
+    this.#mirrored = null;
+    this.refresh();
+  }
+
+  // --- Accessibility -> device ----------------------------------------------
+
+  /**
+   * Re-reads every Claude window, diffs against what the device already shows,
+   * and sends only what changed. Safe to call as often as the watcher fires.
+   */
+  refresh() {
+    this.#mirror(this.#tracker.update(this.#source.readSessions(this.#treeDepth)));
+  }
+
+  /**
+   * Surfaces a daemon-side failure on the device. The state is the daemon's
+   * own, so it is not tied to any session.
+   */
+  showError(message) {
+    this.send(encode.state(ClaudeState.error, message));
+    this.send(encode.error(message));
+    this.#mirrored = { ...(this.#mirrored ?? {}), state: ClaudeState.error, detail: message };
+  }
+
+  /** Mirrors an interpreted view. */
+  #mirror(view) {
+    this.#view = view;
+    const previous = this.#mirrored;
+    const permission = this.#choosePermission(view);
+    // The box asks one question at a time, and everything it shows around that
+    // question must describe the session that asked it. Following the window in
+    // front instead had the state flip between two conversations whenever the
+    // operator changed window — and answering a request left the box on a
+    // session they never chose. A session picked on the box still wins.
+    const followed = permission && !view.selected
+      ? view.sessions.find((session) => session.id === permission.sessionId) ?? view.focused
+      : view.focused;
+    const snapshot = followed?.snapshot ?? EMPTY_SNAPSHOT;
+    this.#notePressOutcome(permission);
+
+    // Frame order matters on e-ink. The permission screen has priority on the
+    // device, so clearing it *before* the new state — and setting it *after* —
+    // means each transition costs one redraw instead of two.
+    if (previous?.permission
+        && previous.permission.request.id !== permission?.request.id) {
+      const gone = previous.permission;
+      this.#log.info(
+        this.#log.sessionTag(gone.sessionId),
+        `permission ${gone.request.id} cleared`,
+        gone.sessionId,
+      );
+      this.#gate.clear();
+      this.send(encode.permissionCleared(gone.request.id));
+    }
+
+    // The session list is level-triggered: it names the permission the daemon
+    // considers active, so the device can reconcile even if a clear was lost.
+    const sessionsLine = encode.sessions(
+      view.sessions.map((session) => ({
+        id: session.id,
+        name: session.name,
+        state: session.snapshot.state,
+      })),
+      { focus: followed?.id ?? null, permission: permission?.request.id ?? null },
+    );
+    if (sessionsLine !== previous?.sessionsLine) {
+      this.#logSessions(view);
+      this.send(sessionsLine);
+    }
+
+    if (previous?.state !== snapshot.state || previous?.detail !== snapshot.detail) {
+      // The state describes the followed session, so the line wears its colour.
+      const tag = followed ? this.#log.sessionTag(followed.id) : LogTag.session;
+      this.#log.info(tag, `state ${previous?.state ?? '-'} -> ${snapshot.state}`,
+                     followed?.id ?? undefined);
+      this.send(encode.state(snapshot.state, snapshot.detail));
+    }
+
+    // Switching session must not leave the previous one's reply on screen, so
+    // an empty message is sent rather than skipped.
+    const message = snapshot.lastMessage ?? '';
+    if (message !== (previous?.lastMessage ?? '')) {
+      this.send(encode.message(message));
+    }
+
+    if (permission) {
+      const arrived = previous?.permission?.request.id !== permission.request.id;
+      // A press clears the gate. When the same request is still on screen
+      // afterwards — a press Claude did not act on, or the very same question
+      // asked again — nothing used to re-arm it, and every later press was
+      // refused as "no permission is pending": the box went dead for that
+      // request. Re-arming restarts the delay, so a bouncing key still cannot
+      // answer twice, and the re-read before pressing still guards the press.
+      if (arrived || this.#gate.pending === null) {
+        this.#gate.present(permission.request, this.#now());
+      }
+      if (arrived) {
+        this.#log.info(
+          this.#log.sessionTag(permission.sessionId),
+          `permission ${permission.request.id} (${permission.request.kind}) `
+          + `in ${permission.sessionName}`,
+          permission.sessionId,
+        );
+        // Only a new request is drawn: re-sending it would refresh the e-ink
+        // under the operator's finger.
+        this.send(encode.permission({ ...permission.request, session: permission.sessionId }));
+      }
+    }
+
+    this.#mirrored = {
+      state: snapshot.state,
+      detail: snapshot.detail,
+      lastMessage: snapshot.lastMessage,
+      permission,
+      sessionsLine,
+      // What the device is actually following, which a stop with no session
+      // named falls back to.
+      focusId: followed?.id ?? null,
+    };
+  }
+
+  /**
+   * Puts the request back on the device.
+   *
+   * The box leaves its permission screen the moment it sends a verdict, so the
+   * press feels immediate rather than waiting on a read, a press and a poll.
+   * When that verdict could not be applied the request is still the one to
+   * answer, and re-sending it brings it back at once instead of after the
+   * device's own timeout. A device still showing it is not redrawn: the same id
+   * changes nothing there.
+   */
+  #resendPermission() {
+    const permission = this.#mirrored?.permission;
+    if (!permission) return;
+    this.#log.debug(LogTag.session, `sending ${permission.request.id} again`);
+    this.send(encode.permission({ ...permission.request, session: permission.sessionId }));
+  }
+
+  /**
+   * Reports a press that left its dialog standing.
+   *
+   * `AXPress` answers success for an element that is no longer wired to
+   * anything, and Claude can ask the very same question again, which the
+   * fingerprinted id cannot tell from the first. Either way the operator sees a
+   * request they thought they had answered, so the log says which it was rather
+   * than leaving them to guess.
+   */
+  #notePressOutcome(permission) {
+    const awaiting = this.#awaitingClear;
+    if (awaiting === null) return;
+    if (permission?.request.id !== awaiting.id) {
+      this.#awaitingClear = null;
+      return;
+    }
+    if (awaiting.warned || this.#now() - awaiting.at < PRESS_SETTLE_MS) return;
+    awaiting.warned = true;
+    this.#log.warn(
+      LogTag.session,
+      `Claude still shows ${awaiting.id} after its ${awaiting.action} was pressed: the press `
+      + 'did nothing, or the same question came back. The box can answer it again.',
+    );
+  }
+
+  /**
+   * The one permission the device shows.
+   *
+   * The screen holds a single decision at a time, so with several windows
+   * asking at once they are answered oldest first — and the one already on
+   * screen keeps its place until it is gone. A newer request must never take
+   * over the screen under the operator's finger.
+   */
+  #choosePermission(view) {
+    const pending = SessionTracker.pending(view.sessions);
+    // "No dialog" is real news, wherever the window sits. The registry keeps a
+    // window's element and reads its subtree on any Space, so an empty list is
+    // not a blind spot — it means the request is gone and the device must be
+    // told at once. Holding it back while the window was off the active Space
+    // left the box asking for a decision the user had already made in the app.
+    if (pending.length === 0) return null;
+
+    const current = this.#mirrored?.permission?.request.id;
+    const held = pending.find((session) => session.snapshot.permission.id === current);
+    const chosen = held ?? pending[0];
+    return {
+      request: chosen.snapshot.permission,
+      sessionId: chosen.id,
+      sessionName: chosen.name,
+      bindings: chosen.bindings,
+    };
+  }
+
+  #logSessions(view) {
+    if (view.sessions.length === 0) {
+      this.#log.info(LogTag.session, 'no Claude Desktop window open');
+      return;
+    }
+    // Each id is painted in its own colour, so the list is a legend for every
+    // `[SESSION s2]` line that follows.
+    const listed = view.sessions
+      .map((session) => `${this.#log.paint(session.id)}:${session.name} ${session.snapshot.state}`)
+      .join(', ');
+    const following = view.focusId ? this.#log.paint(view.focusId) : '-';
+    this.#log.info(LogTag.session, `sessions ${listed} (following ${following})`);
+  }
+
+  // --- Device -> Accessibility ----------------------------------------------
+
+  handleInbound(line) {
+    const result = decodeInbound(line);
+    if (result.rejected !== undefined) {
+      this.#log.warn(LogTag.serial,
+                     `rejected frame (${result.rejected}): ${clip(redactForLog(line))}`);
+      return;
+    }
+    this.#handleFrame(result.frame);
+  }
+
+  #handleFrame(frame) {
+    switch (frame.type) {
+      case 'hello':
+        this.#log.info(LogTag.device, `hello from ${frame.app ?? 'device'} ${frame.version ?? ''}`);
+        // A device that says hello has just booted: no clock yet.
+        this.#sendTime();
+        this.#mirrored = null;
+        this.refresh();
+        break;
+
+      case 'otp':
+        this.#copyOtp(frame);
+        break;
+
+      case 'action':
+        this.#perform(frame.action, frame.requestId, frame.sessionId);
+        break;
+
+      case 'focus':
+        this.#follow(frame.sessionId);
+        break;
+
+      case 'navigation':
+        this.#log.debug(LogTag.device, `navigation ${frame.action}`);
+        break;
+
+      case 'log':
+        this.#log[frame.level](LogTag.device, frame.message);
+        break;
+
+      case 'ping':
+        this.send(encode.pong(frame.seq));
+        break;
+
+      case 'pong':
+        this.#missedPings = 0;
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  #perform(action, requestId, sessionId) {
+    this.#log.info(LogTag.serial, `Received ${action}${requestId ? ` ${requestId}` : ''}`);
+
+    const verdict = this.#gate.validate(action, requestId, this.#now());
+    if (!verdict.accepted) {
+      this.#log.warn(LogTag.session, `refused ${action}: ${verdict.reason}`);
+      this.#resendPermission();
+      return;
+    }
+
+    switch (action) {
+      case DeviceAction.approve:
+      case DeviceAction.deny:
+        this.#performVerdict(action, requestId);
+        break;
+      case DeviceAction.approveAll:
+        this.#performApproveAll(requestId);
+        break;
+      case DeviceAction.stop:
+        this.#pressStop(sessionId);
+        break;
+      case DeviceAction.context:
+        // No default mapping: Claude exposes no single "contextual" control.
+        // The device uses that key locally, for paging and navigation.
+        this.#log.debug(LogTag.session, 'context action is device-local; nothing to press');
+        break;
+      default:
+        break;
+    }
+  }
+
+  /**
+   * Re-reads the tree immediately before pressing.
+   *
+   * The bindings captured at display time could be seconds old, and the only
+   * thing that makes an approve safe is that the dialog on screen *right now*
+   * is still the one the user saw. So the whole tree is read again, the session
+   * still showing this exact request id is located, and its own button is
+   * pressed — never another window's.
+   */
+  #performVerdict(action, requestId) {
+    const view = this.#tracker.update(this.#source.readSessions(this.#treeDepth));
+    const owner = view.sessions.find(
+      (session) => session.snapshot.permission?.id === requestId,
+    );
+
+    // The window is readable and still shows this request: press its live
+    // button. This is the normal path and the safest — the dialog is confirmed.
+    if (owner) {
+      const ref = owner.bindings.get(action);
+      if (!ref) {
+        this.#log.error(this.#log.sessionTag(owner.id),
+                        `no ${action} button bound for ${requestId}`, owner.id);
+        this.#resendPermission();
+        return;
+      }
+      if (this.#pressFor(action, ref, owner.name, owner.id)) {
+        this.#awaitingClear = { id: requestId, action, at: this.#now(), warned: false };
+      }
+      return;
+    }
+
+    // The request is not visible. If some *other* request is on screen, the
+    // dialog changed under the user — refuse, exactly as the re-read is meant to.
+    if (view.sessions.some((session) => session.snapshot.permission)) {
+      this.#log.warn(
+        LogTag.session,
+        `refused ${action} ${requestId}: Claude now shows a different request`,
+      );
+      this.#gate.clear();
+      this.#mirror(view);
+      return;
+    }
+
+    // Nothing is visible anywhere. The re-read is authoritative — a window is
+    // read wherever it sits, full-screen app in front or not — so the dialog has
+    // genuinely gone, and this verdict could only land on whatever replaced it.
+    this.#log.warn(LogTag.session, `refused ${action} ${requestId}: the request is gone from Claude`);
+    this.#gate.clear();
+    this.#mirror(view);
+  }
+
+  /**
+   * Approves every queued request at once.
+   *
+   * Anchored on the request shown on the device (`requestId`), which the gate
+   * has already armed and matched. Each pending window's own approve button is
+   * pressed — the queued ones are authorised sight-unseen, which is the whole
+   * point of the gesture, so it is deliberately a separate control on the box.
+   */
+  #performApproveAll(requestId) {
+    const view = this.#tracker.update(this.#source.readSessions(this.#treeDepth));
+    const pending = SessionTracker.pending(view.sessions);
+
+    // If the anchor is gone but a different request is up, the screen changed
+    // under the user — refuse the bulk action rather than approve the wrong set.
+    const anchorVisible = pending.some((session) => session.snapshot.permission.id === requestId);
+    if (!anchorVisible && pending.length > 0) {
+      this.#log.warn(LogTag.session, 'refused approve_all: Claude now shows a different request');
+      this.#gate.clear();
+      this.#mirror(view);
+      return;
+    }
+
+    let approved = 0;
+    for (const owner of pending) {
+      const ref = owner.bindings.get(DeviceAction.approve);
+      if (!ref) {
+        this.#log.info(this.#log.sessionTag(owner.id),
+                       `approve_all: ${owner.name} offers no one-off approve; left for you`, owner.id);
+        continue;
+      }
+      if (this.#pressFor(DeviceAction.approve, ref, owner.name, owner.id, /*clear=*/false)) {
+        approved += 1;
+      }
+    }
+
+    this.#log.info(LogTag.session, `approve_all pressed ${approved} approve button(s)`);
+    this.#gate.clear();
+  }
+
+  /**
+   * Presses one verdict button and reports it. Clears the gate on success
+   * unless `clear` is false (approve_all clears once at the end instead).
+   */
+  #pressFor(action, ref, name, sessionId, clear = true) {
+    try {
+      this.#log.info(this.#log.sessionTag(sessionId),
+                     `${action} — pressing "${ref.marker}" in ${name}`, sessionId);
+      this.#source.pressRef(ref);
+      if (clear) this.#gate.clear();
+      return true;
+    } catch (error) {
+      this.#log.error(LogTag.ax, `press failed: ${error.message}`);
+      this.send(encode.error('press failed'));
+      this.#resendPermission();
+      return false;
+    }
+  }
+
+  /**
+   * Stops the turn in the session the device named, falling back to the one it
+   * is following.
+   */
+  #pressStop(sessionId) {
+    const sessions = this.#view?.sessions ?? [];
+    const following = this.#mirrored?.focusId ?? this.#view?.focusId;
+    const target = sessions.find((session) => session.id === sessionId)
+      ?? sessions.find((session) => session.id === following);
+
+    if (!target) {
+      this.#log.info(LogTag.session, `no session to stop (${sessionId ?? 'none named'})`);
+      return;
+    }
+    const ref = target.bindings.get(DeviceAction.stop);
+    if (!ref) {
+      this.#log.info(this.#log.sessionTag(target.id),
+                     `no stop control in ${target.name} right now`, target.id);
+      return;
+    }
+    try {
+      this.#log.info(this.#log.sessionTag(target.id),
+                     `stop — pressing "${ref.marker}" in ${target.name}`, target.id);
+      this.#source.pressRef(ref);
+    } catch (error) {
+      this.#log.error(LogTag.ax, `press failed: ${error.message}`);
+    }
+  }
+
+  /** Follows another session, and reports on it immediately. */
+  #follow(sessionId) {
+    if (!this.#tracker.focus(sessionId)) {
+      this.#log.warn(LogTag.session, `cannot follow ${sessionId}: no such session`);
+      return;
+    }
+    this.#log.info(this.#log.sessionTag(sessionId), 'now following this session', sessionId);
+    if (this.#view === null) {
+      this.refresh();
+      return;
+    }
+    // Re-mirroring the view already in hand answers the key press without
+    // waiting on another Accessibility read, which can take a few hundred ms.
+    this.#mirror({
+      ...this.#view,
+      focusId: sessionId,
+      focused: this.#view.sessions.find((session) => session.id === sessionId) ?? null,
+    });
+  }
+
+  // --- Liveness --------------------------------------------------------------
+
+  /** The Mac's clock, for the device's one-time codes. */
+  #sendTime() {
+    this.send(encode.time(this.#now()));
+  }
+
+  /**
+   * Puts a one-time code the device made — on a physical press, the only way
+   * it makes one — on the clipboard, and wipes it once its window has closed.
+   *
+   * There is no way to ask the device for a code from here, by design: the
+   * secrets stay on the box, and a code only exists because someone pressed a
+   * key. The code itself is never logged.
+   */
+  #copyOtp({ code, label, expiresInMs }) {
+    const who = label ? `"${label}"` : 'an account';
+    try {
+      this.#clipboard.copy(code);
+    } catch (error) {
+      this.#log.error(LogTag.device, `could not copy the code for ${who}: ${error.message}`);
+      return;
+    }
+    this.#log.info(
+      LogTag.device,
+      `one-time code for ${who} copied to the clipboard, ${Math.round(expiresInMs / 1000)} s left`,
+    );
+
+    if (this.#clipboardTimer !== null) this.#timers.clearTimeout(this.#clipboardTimer);
+    this.#clipboardCode = code;
+    this.#clipboardTimer = this.#timers.setTimeout(() => {
+      this.#clipboardTimer = null;
+      this.#wipeClipboardCode();
+    }, expiresInMs + OTP_CLEAR_GRACE_MS);
+    this.#clipboardTimer?.unref?.();
+  }
+
+  /** Empties the clipboard if it still holds our code; what the user copied since is theirs. */
+  #wipeClipboardCode() {
+    const code = this.#clipboardCode;
+    this.#clipboardCode = null;
+    if (this.#clipboardTimer !== null) {
+      this.#timers.clearTimeout(this.#clipboardTimer);
+      this.#clipboardTimer = null;
+    }
+    try {
+      if (this.#clipboard.read() === code) {
+        this.#clipboard.copy('');
+        this.#log.info(LogTag.device, 'expired one-time code cleared from the clipboard');
+      }
+    } catch (error) {
+      this.#log.warn(LogTag.device, `could not check the clipboard: ${error.message}`);
+    }
+  }
+
+  #sendPing() {
+    if (!this.#transport.isConnected) return;
+    if (this.#missedPings >= MAX_MISSED_PINGS) {
+      this.#log.warn(LogTag.serial, `${this.#missedPings} pings unanswered; reopening the port`);
+      this.#missedPings = 0;
+      this.#transport.reset();
+      return;
+    }
+    this.#pingSeq += 1;
+    this.#missedPings += 1;
+    this.send(encode.ping(this.#pingSeq));
+  }
+
+  // --- Helpers ---------------------------------------------------------------
+
+  send(line) {
+    this.#transport.send(line);
+  }
+}
+
+function clip(line) {
+  return line.length > 120 ? `${line.slice(0, 120)}…` : line;
+}
+
+export { ClaudeState, DEFAULT_APPROVE_DELAY_MS };

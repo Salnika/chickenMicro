@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  daemon:
+    # The daemon talks to the macOS Accessibility API, so it is only ever built
+    # and tested on macOS. The tests themselves need no Claude Desktop and no
+    # Accessibility grant: they run against the fixtures in src/simulation.
+    name: Mac daemon
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: mac/package-lock.json
+      - run: npm ci
+        working-directory: mac
+      - run: npm test
+        working-directory: mac
+
+  firmware:
+    # Cross-compiled, so Linux is fine and faster. Covers the host unit tests
+    # (protocol, state, layout — no hardware in them) and every board variant.
+    name: Firmware
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio/.cache
+            ~/.platformio/packages
+            ~/.platformio/platforms
+          key: pio-${{ runner.os }}-${{ hashFiles('esp32/platformio.ini') }}
+          restore-keys: pio-${{ runner.os }}-
+      - run: pip install --upgrade platformio
+      - name: Host unit tests
+        run: pio test -e native
+        working-directory: esp32
+      - name: Build every board variant
+        run: pio run -e esp32dev -e esp32dev_mock -e esp32-s3-devkitc-1 -e esp32-c3-supermini -e esp32dev_clear_panel
+        working-directory: esp32

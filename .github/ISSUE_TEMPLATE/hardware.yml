@@ -1,0 +1,37 @@
+name: Hardware question or variant
+description: A different board, a different panel, or wiring that needed changing
+labels: ["hardware"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Parts list and pinout: `docs/wiring.md`.
+        Every pin lives in `esp32/include/Config.h`, and the panel is one
+        `#define` in `esp32/include/DisplayModel.h` — so most variants are a
+        config change rather than a code change.
+
+  - type: input
+    id: board
+    attributes:
+      label: Board
+      placeholder: ESP32-C3 SuperMini
+    validations:
+      required: true
+
+  - type: input
+    id: panel
+    attributes:
+      label: Panel
+      placeholder: GDEY0213Z98
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: What you are trying to do
+      description: >
+        If you already got it working, say what you changed — that is the part
+        worth putting in the docs for the next person.
+    validations:
+      required: true
