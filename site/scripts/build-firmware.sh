@@ -36,18 +36,30 @@ if ! command -v pio >/dev/null 2>&1; then
   exit 1
 fi
 
-# esptool renamed its entry point; accept either.
+# esptool renamed its entry point between releases, and PlatformIO ships its
+# own copy — which is the one most machines already have, so it is worth
+# falling back to rather than asking for another install.
+pio_core="${PLATFORMIO_CORE_DIR:-$HOME/.platformio}"
 if command -v esptool >/dev/null 2>&1; then
   ESPTOOL=(esptool)
 elif command -v esptool.py >/dev/null 2>&1; then
   ESPTOOL=(esptool.py)
+elif [ -x "$pio_core/penv/bin/python3" ] && [ -f "$pio_core/packages/tool-esptoolpy/esptool.py" ]; then
+  ESPTOOL=("$pio_core/penv/bin/python3" "$pio_core/packages/tool-esptoolpy/esptool.py")
 else
-  echo "esptool not found. pip install esptool" >&2
+  echo "esptool not found. pip install esptool, or build once so PlatformIO fetches it" >&2
   exit 1
 fi
 
-boot_app0="$(find "${PLATFORMIO_CORE_DIR:-$HOME/.platformio}/packages" \
-  -name boot_app0.bin -path '*framework-arduinoespressif32*' 2>/dev/null | head -1)"
+# Looked up after the first build, not before: on a clean machine the Arduino
+# framework package does not exist until PlatformIO has fetched it, and `find`
+# on a missing directory fails the whole script under `set -e` with its only
+# explanation sent to /dev/null.
+find_boot_app0() {
+  find "${PLATFORMIO_CORE_DIR:-$HOME/.platformio}/packages" \
+    -name boot_app0.bin -path '*framework-arduinoespressif32*' 2>/dev/null | head -1 || true
+}
+boot_app0=""
 
 wanted=("${@}")
 if [ ${#wanted[@]} -eq 0 ]; then
@@ -87,6 +99,7 @@ for env in "${wanted[@]}"; do
   )
   # boot_app0 initialises the OTA selector. Without it a board that has run
   # an OTA build before can come up pointing at a slot this image never wrote.
+  [ -n "$boot_app0" ] || boot_app0="$(find_boot_app0)"
   if [ -n "$boot_app0" ] && [ -f "$boot_app0" ]; then
     parts+=("0xe000" "$boot_app0")
   else
