@@ -1,8 +1,14 @@
 name: Pages
 
-# The site ships the firmware it flashes, so this builds esp32/ first and only
-# then the Vite app. Nothing binary is committed: the images are produced here
-# and exist only inside the artifact that gets deployed.
+# The site and the firmware are built by two independent jobs that run at the
+# same time and never wait on each other. The firmware takes minutes and needs
+# a whole embedded toolchain; the page takes seconds. Chaining them meant a
+# toolchain problem took the site down with it, which is backwards — the page
+# is useful on its own, and it already says so when an image is missing.
+#
+# So: the site deploys whatever happens to the firmware. A failed firmware job
+# is reported, and the flasher shows "no image published for this build yet"
+# until it is fixed.
 
 on:
   push:
@@ -25,8 +31,37 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  site:
+    name: Build the page
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 22, not 20: Vite 8 wants ^20.19 || >=22.12. This builds the site only,
+      # so it does not constrain what the daemon supports.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: site/package-lock.json
+
+      - run: npm ci
+        working-directory: site
+
+      - run: npm run build
+        working-directory: site
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: page
+          path: site/dist
+          retention-days: 1
+
+  firmware:
+    name: Build the firmware images
+    runs-on: ubuntu-latest
+    # Never fails the run: the page ships without images rather than not at all.
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -45,36 +80,51 @@ jobs:
 
       - run: pip install --upgrade platformio esptool
 
-      - name: Build and merge the firmware images
-        run: site/scripts/build-firmware.sh
+      - run: site/scripts/build-firmware.sh
 
-      # 22, not 20: Vite 8 wants ^20.19 || >=22.12, and this only builds the
-      # site. The daemon's own job stays on 20, which is what its engines
-      # field claims to support.
-      - uses: actions/setup-node@v4
+      - uses: actions/upload-artifact@v4
         with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: site/package-lock.json
-
-      - run: npm ci
-        working-directory: site
-
-      - run: npm run build
-        working-directory: site
-
-      - uses: actions/configure-pages@v5
-
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: site/dist
+          name: firmware
+          path: site/public/firmware
+          retention-days: 1
 
   deploy:
-    needs: build
+    name: Deploy
+    needs: [site, firmware]
+    # `always()` so a failed firmware job cannot hold the page back; the page
+    # itself still has to have built.
+    if: always() && needs.site.result == 'success'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: page
+          path: dist
+
+      # Missing when the firmware job failed, which is allowed to happen.
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: firmware
+          path: dist/firmware
+
+      - name: Say what is being published
+        run: |
+          if [ -f dist/firmware/manifest.json ]; then
+            echo "Firmware images:"
+            cat dist/firmware/manifest.json
+          else
+            echo "::warning::No firmware images — the flasher will report none published."
+          fi
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
       - id: deployment
         uses: actions/deploy-pages@v4

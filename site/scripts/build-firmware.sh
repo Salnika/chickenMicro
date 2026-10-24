@@ -61,8 +61,12 @@ find_boot_app0() {
 }
 boot_app0=""
 
-wanted=("${@}")
-if [ ${#wanted[@]} -eq 0 ]; then
+# macOS still ships bash 3.2, which errors on "$@" under `set -u` when there
+# are no arguments at all. CI runs bash 5 and would never have caught it, so
+# the no-argument case must not expand "$@".
+if [ "$#" -gt 0 ]; then
+  wanted=("$@")
+else
   wanted=()
   for entry in "${BOARDS[@]}"; do wanted+=("${entry%%:*}"); done
 fi
