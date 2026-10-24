@@ -41,9 +41,11 @@ const BRIDGES: ReadonlyArray<{
   { vid: 0x1a86, pid: 0x55d4, label: 'WCH CH9102' },
   { vid: 0x0403, label: 'FTDI' },
   // Espressif's own vendor id: the S3 and C3 expose USB directly, with no
-  // bridge chip in between.
-  { vid: 0x303a, pid: 0x1001, label: 'Espressif native USB', impliesChip: 'ESP32-S3' },
-  { vid: 0x303a, pid: 0x1003, label: 'Espressif native USB', impliesChip: 'ESP32-C3' },
+  // bridge chip in between. 1001 is the ROM USB-Serial/JTAG peripheral and is
+  // shared by the S3, C3, C6 and H2 alike, so it names no chip — only the
+  // chip esptool reports once connected can do that.
+  { vid: 0x303a, pid: 0x1001, label: 'Espressif USB-Serial/JTAG' },
+  { vid: 0x303a, pid: 0x0002, label: 'Espressif USB-OTG', impliesChip: 'ESP32-S2' },
   { vid: 0x303a, label: 'Espressif native USB' },
 ];
 
