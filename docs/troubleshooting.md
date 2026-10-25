@@ -654,21 +654,35 @@ And on the Mac side:
 | `refused approve: stale requestId req-N, current is req-M` | the dialog changed between display and press — press again on the current screen |
 | `refused approve …: the request is gone from Claude` | the dialog closed first, e.g. you clicked in the app |
 | `no approve button bound for req-N` | the button was recognised as text but exposes no `AXPress` |
-| `Claude still shows req-N after its approve was pressed` | the button answered the press but the dialog stayed — see below |
+| `req-N is still on screen after its approve was pressed; pressing it once more` | the first press did nothing, so the daemon repeated it once — see below |
+| `not pressing approve req-N again: …` | the repeat was refused by the gate (arming delay, or the request changed); press again yourself |
+| `Claude still shows req-N after its approve was pressed twice` | neither press took, or the same question came back — see below |
 
 All of these are the safety rules doing their job. Both sides validate
 independently — see [PROTOCOL.md §5](../protocol/PROTOCOL.md).
 
 ### The same request comes back, or a press changes nothing
 
-`AXPress` reports success for a button that is no longer wired to anything, and
-Claude can ask the very same question again — which the id, built from the text
-on screen, cannot tell from the first. Either way the box shows a request that
-looks unanswered, and the daemon says so:
+`AXPress` reports success for a button that is no longer wired to anything — in
+practice the first press on a dialog is often dropped, and the next one lands.
+Claude can also ask the very same question again, which the id, built from the
+text on screen, cannot tell from the first.
+
+So when the same request is still on screen 1.5 s after a verdict was pressed,
+the daemon presses it once more, after reading the tree again:
 
 ```
-! [SESSION] Claude still shows s5.req-4 after its approve was pressed: the press
-  did nothing, or the same question came back. The box can answer it again.
+[SESSION] s5.req-4 is still on screen after its approve was pressed; pressing it once more
+```
+
+It does this once per press, for APPROVE and DENY alike, and only through the
+checks any press goes through: the gate, and a fresh read that finds this exact
+request. If the second press changes nothing either, the box shows a request
+that looks unanswered, and the daemon says so:
+
+```
+! [SESSION] Claude still shows s5.req-4 after its approve was pressed twice: the
+  press did nothing, or the same question came back. The box can answer it again.
 ```
 
 Press it again: the daemon re-reads the tree and presses the button that is

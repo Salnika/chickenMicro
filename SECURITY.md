@@ -42,6 +42,15 @@ presses. A LaunchAgent scopes it to the binary instead, which is why
 [`docs/setup-macos.md`](docs/setup-macos.md#running-it-as-a-login-agent-optional)
 prefers one for anything long-running.
 
+**A press Claude did not act on is repeated, once.** `AXPress` can report
+success for a button that did nothing, so when the same request is still on
+screen 1.5 s after a verdict, the daemon presses it again — after reading the
+tree again, and through the same gate as any press. It is your one press, not a
+second verdict, but if Claude closed the dialog and asked an identical question
+in that interval, the repeat lands on the new one. Same text, same request id:
+it is the decision you already made. It never repeats twice, and never presses
+for a different request.
+
 **The log can contain the text of permissions and messages.** At `--log debug`
 the file holds every frame in both directions. One-time codes are the exception
 and are masked everywhere, including in debug traces. `--no-log-file` turns the

@@ -18,9 +18,10 @@ export const VERSION = '1.1.0';
 /**
  * How long Claude is given to take down a dialog after its button was pressed.
  *
- * Past this, the press is worth reporting: the button answered AXPress with
- * success, so the only way to tell it did nothing is that the request is still
- * there. Long enough that a busy app is not accused of it.
+ * Past this the press is pressed once more, and reported if that does nothing
+ * either: the button answered AXPress with success, so the only way to tell it
+ * did nothing is that the request is still there. Long enough that a busy app is
+ * not accused of it.
  */
 const PRESS_SETTLE_MS = 1500;
 
@@ -56,6 +57,8 @@ export class SessionCoordinator {
 
   /** A verdict pressed and not yet seen to clear, so a press that did nothing is said aloud. */
   #awaitingClear = null;
+  /** The press above, once it has been waited on in vain and is due its one retry. */
+  #retryDue = null;
 
   #clipboard;
   #timers;
@@ -122,6 +125,7 @@ export class SessionCoordinator {
     this.#log.info(LogTag.session, 'device connected, resynchronising');
     this.#missedPings = 0;
     this.#awaitingClear = null;
+    this.#retryDue = null;
     this.send(encode.hello(this.appName, this.appVersion, this.#gate.approveDelayMs));
     this.#sendTime();
     // Force a full resend: the device has just booted or reconnected and knows
@@ -138,6 +142,9 @@ export class SessionCoordinator {
    */
   refresh() {
     this.#mirror(this.#tracker.update(this.#source.readSessions(this.#treeDepth)));
+    // After the mirror, never inside it: a retry reads the tree again and can
+    // mirror what it finds.
+    this.#retryPress();
   }
 
   /**
@@ -265,13 +272,17 @@ export class SessionCoordinator {
   }
 
   /**
-   * Reports a press that left its dialog standing.
+   * Notes what became of a pressed verdict, and asks for it to be pressed once
+   * more when its dialog is still there.
    *
    * `AXPress` answers success for an element that is no longer wired to
-   * anything, and Claude can ask the very same question again, which the
-   * fingerprinted id cannot tell from the first. Either way the operator sees a
-   * request they thought they had answered, so the log says which it was rather
-   * than leaving them to guess.
+   * anything, and in the wild the first press on a dialog is often dropped while
+   * the next one lands. So a verdict whose request is still on screen
+   * `PRESS_SETTLE_MS` later is due one retry, see `#retryPress`. If that does
+   * nothing either — or Claude asked the very same question again, which the
+   * fingerprinted id cannot tell from the first — the operator sees a request
+   * they thought they had answered, so the log says so rather than leaving them
+   * to guess.
    */
   #notePressOutcome(permission) {
     const awaiting = this.#awaitingClear;
@@ -282,11 +293,49 @@ export class SessionCoordinator {
     }
     if (awaiting.warned || this.#now() - awaiting.at < PRESS_SETTLE_MS) return;
     awaiting.warned = true;
+    if (!awaiting.retried) {
+      this.#retryDue = awaiting;
+      return;
+    }
+    this.#warnStillShown(awaiting);
+  }
+
+  #warnStillShown(awaiting) {
     this.#log.warn(
       LogTag.session,
-      `Claude still shows ${awaiting.id} after its ${awaiting.action} was pressed: the press `
-      + 'did nothing, or the same question came back. The box can answer it again.',
+      `Claude still shows ${awaiting.id} after its ${awaiting.action} was pressed`
+      + `${awaiting.retried ? ' twice' : ''}: the press did nothing, or the same question `
+      + 'came back. The box can answer it again.',
     );
+  }
+
+  /**
+   * Presses a verdict a second time, once, when Claude left its dialog standing.
+   *
+   * The operator pressed once, deliberately; this repeats *that* press and
+   * nothing else. It goes through everything a press does — the gate, so the
+   * request must still be the one pending and armed, and the fresh read that
+   * finds the dialog still showing this exact request id — and it happens at
+   * most once per press: a second failure is reported, never retried.
+   */
+  #retryPress() {
+    const due = this.#retryDue;
+    if (due === null) return;
+    this.#retryDue = null;
+    if (this.#awaitingClear !== due) return;
+
+    const verdict = this.#gate.validate(due.action, due.id, this.#now());
+    if (!verdict.accepted) {
+      this.#log.warn(LogTag.session,
+                     `not pressing ${due.action} ${due.id} again: ${verdict.reason}`);
+      this.#warnStillShown(due);
+      return;
+    }
+    this.#log.info(
+      LogTag.session,
+      `${due.id} is still on screen after its ${due.action} was pressed; pressing it once more`,
+    );
+    this.#performVerdict(due.action, due.id, { retry: true });
   }
 
   /**
@@ -426,7 +475,7 @@ export class SessionCoordinator {
    * still showing this exact request id is located, and its own button is
    * pressed — never another window's.
    */
-  #performVerdict(action, requestId) {
+  #performVerdict(action, requestId, { retry = false } = {}) {
     const view = this.#tracker.update(this.#source.readSessions(this.#treeDepth));
     const owner = view.sessions.find(
       (session) => session.snapshot.permission?.id === requestId,
@@ -443,7 +492,9 @@ export class SessionCoordinator {
         return;
       }
       if (this.#pressFor(action, ref, owner.name, owner.id)) {
-        this.#awaitingClear = { id: requestId, action, at: this.#now(), warned: false };
+        this.#awaitingClear = {
+          id: requestId, action, at: this.#now(), warned: false, retried: retry,
+        };
       }
       return;
     }

@@ -326,20 +326,108 @@ describe('which session the box describes', () => {
   });
 });
 
+const denyLine = (id) => `{"v":1,"type":"action","action":"deny","requestId":"${id}"}`;
+const stillShows = (f) => f.logged.filter((line) => /still shows/.test(line));
+
 describe('a press that did nothing', () => {
-  it('is reported once the dialog should have gone', () => {
+  it('is pressed once more when the dialog is still there', () => {
+    // Seen in the wild: the first press on a dialog reports success and does
+    // nothing, and the next one lands. The operator pressed once; the daemon
+    // repeats that press rather than leaving them to do it again.
     const f = fixture();
     const id = f.present();
     f.arm();
     f.inbound(approveLine(id));
+    assert.deepEqual(f.source.pressed, ['allow']);
 
     f.coordinator.refresh();          // still there, but only just pressed
-    assert.equal(f.logged.filter((line) => /still shows/.test(line)).length, 0);
+    assert.deepEqual(f.source.pressed, ['allow']);
+
+    f.clock.now += 2000;
+    f.coordinator.refresh();
+    assert.deepEqual(f.source.pressed, ['allow', 'allow']);
+  });
+
+  it('presses a refusal once more as well', () => {
+    const f = fixture();
+    const id = f.present();
+    f.arm();
+    f.inbound(denyLine(id));
+    f.coordinator.refresh();          // the next poll, which re-arms the gate
+    f.clock.now += 2000;
+    f.coordinator.refresh();
+    assert.deepEqual(f.source.pressed, ['deny', 'deny']);
+  });
+
+  it('presses once more, and no more, however long the dialog stays', () => {
+    const f = fixture();
+    const id = f.present();
+    f.arm();
+    f.inbound(approveLine(id));
+    f.coordinator.refresh();
+    for (let poll = 0; poll < 5; poll += 1) {
+      f.clock.now += 2000;
+      f.coordinator.refresh();
+    }
+    assert.deepEqual(f.source.pressed, ['allow', 'allow']);
+  });
+
+  it('does not press again once the dialog has gone', () => {
+    const f = fixture();
+    const id = f.present();
+    f.arm();
+    f.inbound(approveLine(id));
+    f.source.tree = fixtures.idle();
+    f.clock.now += 2000;
+    f.coordinator.refresh();
+    assert.deepEqual(f.source.pressed, ['allow']);
+  });
+
+  it('never presses on behalf of a different request', () => {
+    // The retry repeats one press on one request. A dialog that has been
+    // replaced by another command is not that request.
+    const f = fixture();
+    const id = f.present();
+    f.arm();
+    f.inbound(approveLine(id));
+    f.source.tree = fixtures.permission('Run command', 'rm -rf /');
+    f.clock.now += 2000;
+    f.coordinator.refresh();
+    assert.deepEqual(f.source.pressed, ['allow']);
+  });
+
+  it('waits for the gate like any press', () => {
+    // Re-arming after the first press restarts the arming delay; a retry that
+    // came sooner than that would be a press the gate had not let through.
+    const f = fixture({ approveDelayMs: 5000 });
+    const id = f.present();
+    f.clock.now += 6000;
+    f.inbound(approveLine(id));
+    f.coordinator.refresh();
+    f.clock.now += 2000;
+    f.coordinator.refresh();
+    assert.deepEqual(f.source.pressed, ['allow']);
+    assert.equal(f.logged.filter((line) => /not pressing approve/.test(line)).length, 1);
+  });
+
+  it('is reported once the second press did nothing either', () => {
+    const f = fixture();
+    const id = f.present();
+    f.arm();
+    f.inbound(approveLine(id));
+    f.coordinator.refresh();
+
+    f.clock.now += 2000;
+    f.coordinator.refresh();          // the retry
+    assert.deepEqual(stillShows(f), [], 'the retry is not yet a failure');
+    f.coordinator.refresh();          // the poll that re-arms the gate
 
     f.clock.now += 2000;
     f.coordinator.refresh();
     f.coordinator.refresh();          // said once, not on every poll
-    assert.equal(f.logged.filter((line) => /still shows/.test(line)).length, 1);
+    assert.equal(stillShows(f).length, 1);
+    assert.match(stillShows(f)[0], /twice/);
+    assert.deepEqual(f.source.pressed, ['allow', 'allow']);
   });
 
   it('says nothing when the dialog goes as it should', () => {

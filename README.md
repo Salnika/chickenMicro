@@ -624,6 +624,11 @@ independently ([PROTOCOL.md §5](protocol/PROTOCOL.md)):
   dropped: it is unanswerable while it waits, and it comes back on screen, armed
   afresh, if the Mac has not confirmed within three seconds — or sooner, since
   the Mac re-sends it the moment a verdict cannot be applied.
+- **A press Claude did not act on is pressed once more.** Claude Desktop often
+  drops the first press on a dialog. If the same request is still on screen
+  1.5 s after a verdict, the daemon presses it again — once, after reading the
+  tree again and through the same gate — instead of leaving you to press twice.
+  The limit is in [`SECURITY.md`](SECURITY.md).
 - **A pending permission is dropped** the moment it disappears from Claude, the
   state leaves `waiting_permission`, or the link goes quiet for 10 s.
 - **Serial noise cannot become an action.** Frames must be valid JSON with the
