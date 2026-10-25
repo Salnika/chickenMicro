@@ -13,6 +13,12 @@
 // an answer, never returns a permission update (so nothing is remembered and no
 // mode changes), and never touches the request's input.
 //
+// The same script is also run for a session starting, being given a prompt,
+// finishing a turn and ending. Those only tell the daemon, so that the box knows
+// the session exists and what it is doing. They print nothing at all — for
+// SessionStart and UserPromptSubmit, whatever a hook prints is added to Claude's
+// context — and exit 0, so a turn is never blocked or changed by them.
+//
 // No dependencies: it must start fast and cannot be allowed to break on a
 // missing module.
 import net from 'node:net';
@@ -50,14 +56,46 @@ async function readStdin() {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-/** The one line to send, or null when this is not a request worth sending. */
-function requestLine(text) {
-  let payload;
+/** What happens in a session that the daemon is told about, and nothing else. */
+const EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'Stop', 'SessionEnd']);
+
+/** How long to wait for the daemon to take an event: a local socket needs no more. */
+const TELL_MS = 500;
+
+const str = (value) => (typeof value === 'string' ? value : '');
+
+function parse(text) {
   try {
-    payload = JSON.parse(text);
+    const payload = JSON.parse(text);
+    return payload !== null && typeof payload === 'object' ? payload : null;
   } catch {
     return null;
   }
+}
+
+/**
+ * Which session this is, and where it runs. Claude Code names the front-end that
+ * started the session in `CLAUDE_CODE_ENTRYPOINT` (a terminal, an editor, Claude
+ * Desktop...), which the daemon needs to avoid listing a Desktop conversation twice.
+ */
+function originOf(payload) {
+  return {
+    session: str(payload.session_id),
+    cwd: str(payload.cwd),
+    entrypoint: str(process.env.CLAUDE_CODE_ENTRYPOINT),
+  };
+}
+
+/** The one line to send for a session event, or null when it is not one. */
+function eventLine(payload) {
+  if (!EVENTS.has(payload.hook_event_name)) return null;
+  const origin = originOf(payload);
+  if (origin.session === '' && origin.cwd === '') return null;
+  return `${JSON.stringify({ v: HOOK_VERSION, type: 'event', event: payload.hook_event_name, ...origin })}\n`;
+}
+
+/** The one line to send, or null when this is not a request worth sending. */
+function requestLine(payload) {
   if (payload?.hook_event_name !== 'PermissionRequest') return null;
   if (typeof payload.tool_name !== 'string' || payload.tool_name === '') return null;
 
@@ -65,8 +103,7 @@ function requestLine(text) {
     v: HOOK_VERSION,
     type: 'request',
     tool: payload.tool_name,
-    session: typeof payload.session_id === 'string' ? payload.session_id : '',
-    cwd: typeof payload.cwd === 'string' ? payload.cwd : '',
+    ...originOf(payload),
     input: trimmed(payload.tool_input ?? {}) ?? {},
   };
   let line = `${JSON.stringify(frame)}\n`;
@@ -126,6 +163,23 @@ function ask(line) {
   });
 }
 
+/** Hands the daemon an event and lets go. Never throws, never waits for an answer. */
+function tell(line) {
+  return new Promise((resolve) => {
+    const socket = net.connect(SOCKET);
+    const done = () => {
+      clearTimeout(timer);
+      socket.destroy();
+      resolve();
+    };
+    const timer = setTimeout(done, TELL_MS);
+    // The daemon closes once it has the line; a hook has nothing to wait for after.
+    socket.once('connect', () => socket.end(line));
+    socket.once('close', done);
+    socket.once('error', done);
+  });
+}
+
 function print(verdict) {
   const decision = verdict.decision === 'allow'
     ? { behavior: 'allow' }
@@ -136,7 +190,15 @@ function print(verdict) {
 }
 
 async function main() {
-  const line = requestLine(await readStdin());
+  const payload = parse(await readStdin());
+  if (payload === null) return;
+
+  const event = eventLine(payload);
+  if (event !== null) {
+    await tell(event);
+    return;
+  }
+  const line = requestLine(payload);
   if (line === null) return;
   const verdict = await ask(line);
   if (verdict !== null) print(verdict);

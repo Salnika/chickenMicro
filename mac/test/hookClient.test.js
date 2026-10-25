@@ -29,11 +29,12 @@ const permissionRequest = (extra = {}) => ({
 });
 
 /** Starts the hook as Claude Code would: the request on stdin, the socket in the environment. */
-function runHook(stdin, socket) {
-  const child = spawn(process.execPath, [SCRIPT], {
-    env: { ...process.env, CLAUDE_REMOTE_SOCKET: socket },
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
+function runHook(stdin, socket, { entrypoint } = {}) {
+  const env = { ...process.env, CLAUDE_REMOTE_SOCKET: socket };
+  // The tests may themselves run inside Claude Code, which sets this.
+  delete env.CLAUDE_CODE_ENTRYPOINT;
+  if (entrypoint !== undefined) env.CLAUDE_CODE_ENTRYPOINT = entrypoint;
+  const child = spawn(process.execPath, [SCRIPT], { env, stdio: ['pipe', 'pipe', 'pipe'] });
   let stdout = '';
   child.stdout.on('data', (chunk) => { stdout += chunk; });
   child.stdin.end(typeof stdin === 'string' ? stdin : JSON.stringify(stdin));
@@ -189,6 +190,64 @@ describe('the hook a plugin installs', () => {
         assert.equal(stdout, '');
       }
       assert.equal(registry.live().length, 0, 'none of them may reach the box');
+    });
+  });
+
+  describe('told that something happened in a session', () => {
+    const lifecycle = (event, extra = {}) => ({
+      session_id: 'sess-1',
+      cwd: '/Users/me/docs',
+      transcript_path: '/Users/me/.claude/projects/x/sess-1.jsonl',
+      hook_event_name: event,
+      ...extra,
+    });
+
+    it('tells the daemon, and prints nothing for Claude to read', async () => {
+      await withDaemon(async ({ registry, socket }) => {
+        for (const event of ['SessionStart', 'UserPromptSubmit', 'Stop', 'SessionEnd']) {
+          const extra = event === 'UserPromptSubmit' ? { prompt: 'a prompt the box must never see' } : {};
+          const { code, stdout } = await runHook(lifecycle(event, extra), socket, { entrypoint: 'cli' }).done;
+          // What SessionStart and UserPromptSubmit print is added to Claude's context.
+          assert.equal(stdout, '', event);
+          assert.equal(code, 0, event);
+          if (event === 'UserPromptSubmit') {
+            assert.deepEqual(registry.sessions().map((s) => [s.name, s.state, s.frontEnd]),
+                             [['docs', 'thinking', 'own']]);
+          }
+        }
+        assert.deepEqual(registry.sessions(), [], 'SessionEnd was the last word');
+      });
+    });
+
+    it('says which front-end started the session', async () => {
+      await withDaemon(async ({ registry, socket }) => {
+        await runHook(lifecycle('SessionStart'), socket, { entrypoint: 'claude-desktop' }).done;
+        assert.deepEqual(registry.sessions().map((s) => s.frontEnd), ['desktop']);
+      });
+    });
+
+    it('says nothing about the front-end when Claude Code did not', async () => {
+      await withDaemon(async ({ registry, socket }) => {
+        await runHook(lifecycle('SessionStart'), socket).done;
+        assert.deepEqual(registry.sessions().map((s) => s.frontEnd), ['unknown']);
+      });
+    });
+
+    it('does not wait on the daemon, nor on one that is not there', async () => {
+      await withDaemon(async ({ directory }) => {
+        const started = Date.now();
+        const { code, stdout } = await runHook(lifecycle('Stop'), join(directory, 'nobody.sock')).done;
+        assert.equal(code, 0);
+        assert.equal(stdout, '');
+        assert.ok(Date.now() - started < 2000, 'a prompt must not be held up');
+      });
+    });
+
+    it('never carries the prompt, the transcript or anything else it was handed', async () => {
+      await withDaemon(async ({ registry, socket }) => {
+        await runHook(lifecycle('UserPromptSubmit', { prompt: 'secret' }), socket, { entrypoint: 'cli' }).done;
+        assert.ok(!JSON.stringify([registry.sessions(), registry.live()]).includes('secret'));
+      });
     });
   });
 

@@ -10,6 +10,11 @@ const str = (value) => (typeof value === 'string' ? value : '');
 /** The part of a command a dialog is sure to show: its first line. */
 const firstLine = (text) => str(text).split('\n', 1)[0].trim();
 
+/** What a session is called on the box: the folder it runs in. */
+export function sessionNameOf(cwd) {
+  return cwd !== '' ? basename(cwd) : 'Claude';
+}
+
 /**
  * Turns what a hook was handed into what the box shows, in the vocabulary the
  * interpreter already uses for a dialog it read: a `kind`, a `title`, a `content`.
@@ -21,7 +26,7 @@ const firstLine = (text) => str(text).split('\n', 1)[0].trim();
  * @returns {{kind: string, title: string, content: string, salient: string[], sessionName: string}}
  */
 export function summarise({ tool, input = {}, cwd = '' }) {
-  const sessionName = cwd !== '' ? basename(cwd) : 'Claude';
+  const sessionName = sessionNameOf(cwd);
   const path = str(input.file_path ?? input.notebook_path ?? input.path);
   const out = (kind, title, content, salient) => ({
     kind,

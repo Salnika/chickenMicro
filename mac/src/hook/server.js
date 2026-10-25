@@ -1,11 +1,13 @@
-import { chmodSync, existsSync, mkdirSync, unlinkSync } from 'node:fs';
+import {
+  chmodSync, existsSync, mkdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync,
+} from 'node:fs';
 import net from 'node:net';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import process from 'node:process';
 
 import { LogTag } from '../log.js';
-import { HOOK_MAX_LINE_BYTES, decodeHookRequest } from './wire.js';
+import { HOOK_MAX_LINE_BYTES, decodeHookLine } from './wire.js';
 
 /** Overrides where the socket lives, for the daemon and for the hook alike. */
 export const SOCKET_ENV = 'CLAUDE_REMOTE_SOCKET';
@@ -57,8 +59,47 @@ export class HookServer {
         resolve();
       });
     });
-    chmodSync(this.#path, 0o600);
+    try {
+      chmodSync(this.#path, 0o600);
+    } catch (error) {
+      // Listening but not locked down, and nobody holds the handle: take it back.
+      this.stop();
+      throw error;
+    }
+    this.#leaveNode(directory);
     this.#log.info(LogTag.hook, `listening on ${this.#path}`);
+  }
+
+  /**
+   * A hook starts with whatever PATH its host gave it, and VS Code often gives one
+   * without node. This daemon is running under a node that works, so it leaves
+   * the path where the hook's launcher looks.
+   *
+   * The launcher runs what it finds there, so the file is only ever left in a
+   * directory this user alone can write to, and put in place with a rename: a
+   * file or a symlink already standing there is replaced, never written through.
+   * It is a convenience, so failing to leave it never takes the hook channel down.
+   */
+  #leaveNode(directory) {
+    const staged = join(directory, `.node.${process.pid}`);
+    try {
+      const { uid, mode } = statSync(directory);
+      const mine = typeof process.getuid !== 'function' || uid === process.getuid();
+      if (!mine || (mode & 0o022) !== 0) {
+        this.#log.warn(
+          LogTag.hook,
+          `not leaving the path of node in ${directory}: it is not private to this user, `
+          + 'so a hook will look for node on its own PATH',
+        );
+        return;
+      }
+      rmSync(staged, { force: true });
+      writeFileSync(staged, `${process.execPath}\n`, { mode: 0o600, flag: 'wx' });
+      renameSync(staged, join(directory, 'node'));
+    } catch (error) {
+      rmSync(staged, { force: true });
+      this.#log.warn(LogTag.hook, `could not leave the path of node for the hook launcher (${error.message})`);
+    }
   }
 
   stop() {
@@ -111,10 +152,21 @@ export class HookServer {
 
       handled = true;
       clearTimeout(idle);
-      const decoded = decodeHookRequest(buffer.slice(0, newline));
+      const decoded = decodeHookLine(buffer.slice(0, newline));
       if (decoded.rejected !== undefined) {
         this.#log.warn(LogTag.hook, `rejected a hook request (${decoded.rejected})`);
         socket.destroy();
+        return;
+      }
+      if (decoded.event !== undefined) {
+        // Nothing waits on an event: take it and let the hook go.
+        const taken = this.#registry.event(decoded.event);
+        this.#log.debug(
+          LogTag.hook,
+          `${decoded.event.name} in ${decoded.event.session || decoded.event.cwd} `
+          + `(front-end ${decoded.event.entrypoint || 'not said'})${taken ? '' : ', ignored'}`,
+        );
+        socket.end();
         return;
       }
 

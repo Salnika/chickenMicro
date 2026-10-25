@@ -108,6 +108,14 @@ export class SessionTracker {
     return true;
   }
 
+  /**
+   * Forgets the window the device picked, so the box follows the one in front again.
+   * For when the device picks something that is not a window.
+   */
+  release() {
+    this.#selectedId = null;
+  }
+
   get focusId() {
     return this.#selectedId;
   }

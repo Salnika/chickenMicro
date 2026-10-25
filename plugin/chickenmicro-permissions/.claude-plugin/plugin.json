@@ -1,7 +1,7 @@
 {
   "name": "chickenmicro-permissions",
-  "version": "0.1.0",
-  "description": "Answers Claude Code permission requests from the ChickenMicro box, and steps aside when the box or its daemon is not there.",
+  "version": "0.2.0",
+  "description": "Answers Claude Code permission requests from the ChickenMicro box and tells it which sessions are running, and steps aside when the box or its daemon is not there.",
   "author": {
     "name": "salnika"
   },

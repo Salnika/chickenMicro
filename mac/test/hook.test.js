@@ -1,16 +1,29 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import {
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
+} from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
 
-import { HookRegistry, HOOK_GRACE_MS, HOOK_SETTLE_MS } from '../src/hook/registry.js';
+import {
+  HookRegistry,
+  HOOK_DONE_MS,
+  HOOK_GRACE_MS,
+  HOOK_SESSION_TTL_MS,
+  HOOK_SETTLE_MS,
+  HOOK_THINKING_STALE_MS,
+  frontEndOf,
+} from '../src/hook/registry.js';
 import { HookServer } from '../src/hook/server.js';
 import { summarise } from '../src/hook/summary.js';
-import { HOOK_MAX_LINE_BYTES, decodeHookRequest, encodeHook } from '../src/hook/wire.js';
+import {
+  HOOK_MAX_LINE_BYTES, HookEvent, decodeHookLine, decodeHookRequest, encodeHook,
+} from '../src/hook/wire.js';
 import { Log } from '../src/log.js';
-import { decodeInbound } from '../src/protocol/frames.js';
+import { SESSIONS_MAX, SESSION_NAME_MAX_CHARS } from '../src/protocol/constants.js';
+import { decodeInbound, encode } from '../src/protocol/frames.js';
 import { PermissionGate } from '../src/session/permissionGate.js';
 import { SessionCoordinator } from '../src/session/sessionCoordinator.js';
 import { FakeAccessibilitySource, fixtures } from '../src/simulation/fixtures.js';
@@ -69,7 +82,44 @@ describe('hook — the line a hook sends', () => {
 
   it('accepts a well-formed request', () => {
     const { request: decoded } = decodeHookRequest(line({ tool: 'Bash', session: 's', cwd: '/x', input: { a: 1 } }));
-    assert.deepEqual(decoded, { tool: 'Bash', session: 's', cwd: '/x', input: { a: 1 } });
+    assert.deepEqual(decoded, { tool: 'Bash', session: 's', cwd: '/x', entrypoint: '', input: { a: 1 } });
+  });
+
+  it('carries the front-end a session runs in, when the hook says', () => {
+    const { request } = decodeHookRequest(line({ tool: 'Bash', session: 's', entrypoint: 'cli' }));
+    assert.equal(request.entrypoint, 'cli');
+    assert.notEqual(decodeHookRequest(line({ tool: 'Bash', entrypoint: 'x'.repeat(100) })).rejected,
+                    undefined);
+  });
+
+  describe('an event', () => {
+    const event = (frame) => JSON.stringify({ v: 1, type: 'event', ...frame });
+
+    it('is accepted for each thing that can happen in a session', () => {
+      for (const name of ['SessionStart', 'UserPromptSubmit', 'Stop', 'SessionEnd']) {
+        const decoded = decodeHookLine(event({ event: name, session: 's', cwd: '/x', entrypoint: 'cli' }));
+        assert.deepEqual(decoded.event, { name, session: 's', cwd: '/x', entrypoint: 'cli' });
+      }
+    });
+
+    it('is refused when it names nothing it knows, or no session', () => {
+      for (const bad of [
+        event({ event: 'PreToolUse', session: 's' }),
+        event({ session: 's' }),
+        event({ event: 'Stop' }),
+        event({ event: 'Stop', session: '', cwd: '' }),
+        event({ event: 'Stop', session: 'x'.repeat(500) }),
+        event({ event: 'Stop', session: 's', entrypoint: 'x'.repeat(100) }),
+      ]) {
+        assert.notEqual(decodeHookLine(bad).rejected, undefined, bad);
+      }
+    });
+
+    it('is not mistaken for a request, nor a request for an event', () => {
+      assert.notEqual(decodeHookRequest(event({ event: 'Stop', session: 's' })).rejected, undefined);
+      assert.notEqual(decodeHookLine(line({ tool: 'Bash' })).request, undefined);
+      assert.notEqual(decodeHookLine(JSON.stringify({ v: 1, type: 'verdict' })).rejected, undefined);
+    });
   });
 
   it('refuses what it cannot trust, with a reason', () => {
@@ -373,6 +423,75 @@ describe('hook server', () => {
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
+  });
+
+  it('leaves the path of its own node where a hook looks for one', async () => {
+    // A hook may start with a PATH that has no node on it; the daemon, which is
+    // running under one that works, says which.
+    await withServer(async ({ path }) => {
+      assert.equal(readFileSync(join(dirname(path), 'node'), 'utf8').trim(), process.execPath);
+    });
+  });
+
+  /** Starts a server in a directory set up by `prepare`, and hands both to `run`. */
+  async function inDirectory(prepare, run) {
+    const directory = mkdtempSync(join(tmpdir(), 'claude-remote-'));
+    prepare(directory);
+    const server = new HookServer({
+      registry: new HookRegistry(),
+      log: quiet(),
+      path: join(directory, 'hook.sock'),
+    });
+    try {
+      await server.start();
+      await run({ directory, server });
+    } finally {
+      server.stop();
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }
+
+  it('keeps the hook channel up when it cannot leave the path of node', async () => {
+    // The path is a convenience for the launcher, which falls back to the PATH. A
+    // failure to leave it must not leave a socket listening that nothing serves.
+    await inDirectory(
+      (directory) => mkdirSync(join(directory, 'node')),
+      async ({ directory, server }) => {
+        const client = net.connect(server.path);
+        await new Promise((resolve, reject) => {
+          client.once('connect', resolve);
+          client.once('error', reject);
+        });
+        client.destroy();
+        assert.equal(existsSync(join(directory, '.node.' + process.pid)), false,
+                     'no half-written file is left behind');
+      },
+    );
+  });
+
+  it('does not write through a link standing where the path of node goes', async () => {
+    let victim;
+    await inDirectory(
+      (directory) => {
+        victim = join(directory, 'victim');
+        writeFileSync(victim, 'keep');
+        symlinkSync(victim, join(directory, 'node'));
+      },
+      async ({ directory }) => {
+        assert.equal(readFileSync(victim, 'utf8'), 'keep');
+        assert.equal(readFileSync(join(directory, 'node'), 'utf8').trim(), process.execPath);
+      },
+    );
+  });
+
+  it('leaves no path of node in a directory other users can write to', async () => {
+    // The launcher runs what it finds there, so a shared directory is no place for it.
+    await inDirectory(
+      (directory) => chmodSync(directory, 0o777),
+      async ({ directory }) => {
+        assert.equal(existsSync(join(directory, 'node')), false);
+      },
+    );
   });
 
   it('will not start over a daemon that is still listening', async () => {
@@ -694,5 +813,570 @@ describe('without a hook', () => {
     coordinator.refresh();
     assert.equal(transport.framesOfType('permission').at(-1).id, 's1.req-1');
     coordinator.handleInbound('{"v":1,"type":"mode","value":"ui"}');
+  });
+});
+
+describe('the sessions hooks have spoken for', () => {
+  const UUID_A = '3f2a9c1e-7b44-4d2a-9d11-aaaaaaaaaaaa';
+  const UUID_B = '9b1d0e55-0c2f-41c8-8a37-bbbbbbbbbbbb';
+
+  it('gives each one a short id of its own, however long its own is', () => {
+    const r = new HookRegistry();
+    r.submit(request('Bash', { command: 'ls' }, { session: UUID_A }), new FakeChannel());
+    r.submit(request('Bash', { command: 'pwd' }, { session: UUID_B, cwd: '/Users/me/docs' }),
+             new FakeChannel());
+
+    const sessions = r.sessions();
+    assert.deepEqual(sessions.map((s) => s.id), ['c1', 'c2']);
+    assert.deepEqual(sessions.map((s) => s.name), ['chickenMicro', 'docs']);
+    for (const session of sessions) {
+      assert.ok(session.id.length <= 16, 'the wire allows 16 characters, a UUID has 36');
+    }
+  });
+
+  it('keeps one id for one session across all its requests', () => {
+    const r = new HookRegistry();
+    r.submit(request('Bash', { command: 'ls' }, { session: UUID_A }), new FakeChannel());
+    r.submit(request('Bash', { command: 'pwd' }, { session: UUID_A }), new FakeChannel());
+    assert.deepEqual(r.sessions().map((s) => s.id), ['c1']);
+    const [first, second] = r.live();
+    assert.equal(first.sessionId, second.sessionId);
+  });
+
+  it('tells two sessions in one folder apart, and only those', () => {
+    const r = new HookRegistry();
+    r.submit(request('Bash', { command: 'ls' }, { session: UUID_A }), new FakeChannel());
+    assert.equal(r.sessions()[0].name, 'chickenMicro', 'alone, it keeps the bare name');
+
+    r.submit(request('Bash', { command: 'pwd' }, { session: UUID_B }), new FakeChannel());
+    r.submit(request('Bash', { command: 'id' }, { session: 'other', cwd: '/Users/me/docs' }),
+             new FakeChannel());
+    assert.deepEqual(r.sessions().map((s) => s.name),
+                     ['chickenMicro (3f2a)', 'chickenMicro (9b1d)', 'docs']);
+  });
+
+  it('says which of them is waiting', () => {
+    const r = new HookRegistry();
+    const { id } = r.submit(request('Bash', { command: 'ls' }, { session: UUID_A }), new FakeChannel());
+    r.submit(request('Bash', { command: 'pwd' }, { session: UUID_B, cwd: '/Users/me/docs' }),
+             new FakeChannel());
+    assert.deepEqual(r.sessions().map((s) => s.pending), [true, true]);
+
+    r.answer(id, 'allow');
+    assert.deepEqual(r.sessions().map((s) => s.pending), [false, true]);
+  });
+
+  it('lets a quiet session age out, but never one that is waiting', () => {
+    const now = { t: 1_000_000 };
+    const r = new HookRegistry({ now: () => now.t });
+    const waiting = r.submit(request('Bash', { command: 'ls' }, { session: UUID_A }), new FakeChannel());
+    const done = r.submit(request('Bash', { command: 'pwd' }, { session: UUID_B, cwd: '/Users/me/docs' }),
+                          new FakeChannel());
+    r.answer(done.id, 'allow');
+
+    now.t += HOOK_SESSION_TTL_MS + 1;
+    assert.deepEqual(r.sessions().map((s) => s.id), ['c1'], 'only the one still asking stays');
+
+    r.answer(waiting.id, 'allow');
+    now.t += HOOK_SESSION_TTL_MS + 1;
+    assert.deepEqual(r.sessions(), []);
+  });
+
+  it('does not list a session whose request was turned away', () => {
+    const r = new HookRegistry();
+    r.setMode('ui');
+    r.submit(request('Bash', { command: 'ls' }, { session: UUID_A }), new FakeChannel());
+    assert.deepEqual(r.sessions(), []);
+  });
+
+  it('keeps the tag where the box cuts a long name', () => {
+    // The box cuts a name at its end, and the tag is at its end: it is the folder
+    // that has to give way, or two sessions read alike.
+    const r = new HookRegistry();
+    const cwd = '/Users/me/claude-remote-feature-oauth-rewrite';
+    r.submit(request('Bash', { command: 'ls' }, { session: UUID_A, cwd }), new FakeChannel());
+    r.submit(request('Bash', { command: 'pwd' }, { session: UUID_B, cwd }), new FakeChannel());
+
+    const names = r.sessions().map((s) => s.name);
+    assert.equal(new Set(names).size, 2);
+    for (const name of names) assert.ok(name.length <= SESSION_NAME_MAX_CHARS, name);
+    assert.match(names[0], /\(3f2a\)$/);
+    assert.match(names[1], /\(9b1d\)$/);
+
+    const sent = JSON.parse(encode.sessions(r.sessions().map((s) => ({ ...s, state: 'idle' }))));
+    assert.deepEqual(sent.sessions.map((s) => s.name), names, 'what is sent is what was named');
+  });
+
+  it('tells two folders of one name apart when their sessions have no id', () => {
+    const r = new HookRegistry();
+    // The paths differ in their first characters on purpose: a tag taken from the
+    // path would then differ too, and the names would not be the short ids.
+    r.submit(request('Bash', { command: 'ls' }, { session: '', cwd: '/a/app' }),
+             new FakeChannel());
+    r.submit(request('Bash', { command: 'ls' }, { session: '', cwd: '/b/app' }),
+             new FakeChannel());
+    assert.deepEqual(r.sessions().map((s) => s.name), ['app (c1)', 'app (c2)']);
+  });
+
+  /** What the box would draw for each session, as the sessions frame encodes it. */
+  const drawn = (r) => JSON.parse(
+    encode.sessions(r.sessions().map((s) => ({ ...s, state: 'idle' }))),
+  ).sessions.map((s) => s.name);
+
+  it('tags folders whose names the box cuts to the same text', () => {
+    const r = new HookRegistry();
+    r.submit(request('Bash', { command: 'ls' }, { session: UUID_A, cwd: '/w/chickenMicro-feature-oauth-rewrite-v1' }),
+             new FakeChannel());
+    r.submit(request('Bash', { command: 'ls' }, { session: UUID_B, cwd: '/w/chickenMicro-feature-oauth-rewrite-v2' }),
+             new FakeChannel());
+
+    const names = drawn(r);
+    assert.equal(new Set(names).size, 2, `both read ${names[0]}`);
+    assert.match(names[0], /\(3f2a\)$/);
+    assert.match(names[1], /\(9b1d\)$/);
+  });
+
+  it('tags folders whose names the box folds to the same text', () => {
+    const r = new HookRegistry();
+    r.submit(request('Bash', { command: 'ls' }, { session: UUID_A, cwd: '/w/cafe' }), new FakeChannel());
+    r.submit(request('Bash', { command: 'ls' }, { session: UUID_B, cwd: '/w/café' }), new FakeChannel());
+
+    const names = drawn(r);
+    assert.equal(new Set(names).size, 2, `both read ${names[0]}`);
+  });
+
+  it('keeps the tag when folding makes a long name longer', () => {
+    // ß is drawn as ss: measured before folding, the name would fit and the box
+    // would then cut the tag off the end.
+    const r = new HookRegistry();
+    const cwd = '/w/Straßenbau-Maßnahmenkatalog-Übersicht';
+    r.submit(request('Bash', { command: 'ls' }, { session: UUID_A, cwd }), new FakeChannel());
+    r.submit(request('Bash', { command: 'ls' }, { session: UUID_B, cwd }), new FakeChannel());
+
+    const names = drawn(r);
+    assert.match(names[0], /\(3f2a\)$/);
+    assert.match(names[1], /\(9b1d\)$/);
+  });
+
+  it('does not tell sessions apart by a tag they share', () => {
+    const r = new HookRegistry();
+    r.submit(request('Bash', { command: 'ls' }, { session: 'abcd-1111' }), new FakeChannel());
+    r.submit(request('Bash', { command: 'ls' }, { session: 'abcd-2222' }), new FakeChannel());
+    assert.deepEqual(r.sessions().map((s) => s.name),
+                     ['chickenMicro (c1)', 'chickenMicro (c2)']);
+  });
+
+  it('drops the quietest session, not the newest, when more are heard than the box lists', () => {
+    const now = { t: 1_000_000 };
+    const r = new HookRegistry({ now: () => now.t });
+    const first = r.submit(request('Bash', { command: 'ls' }, { session: 'first', cwd: '/x/first' }),
+                           new FakeChannel());
+    for (let i = 2; i <= SESSIONS_MAX; i += 1) {
+      now.t += 1000;
+      const { id } = r.submit(request('Bash', { command: 'ls' }, { session: `s${i}`, cwd: `/x/p${i}` }),
+                              new FakeChannel());
+      r.answer(id, 'allow');
+    }
+    // The first session is still waiting; the next one to speak must push out a
+    // quiet one, not it and not itself.
+    now.t += 1000;
+    r.submit(request('Bash', { command: 'ls' }, { session: 'ninth', cwd: '/x/ninth' }),
+             new FakeChannel());
+
+    const sessions = r.sessions();
+    assert.equal(sessions.length, SESSIONS_MAX);
+    assert.ok(sessions.some((s) => s.name === 'ninth'), 'the one that is asking is listed');
+    assert.ok(sessions.some((s) => s.name === 'first' && s.pending), 'so is the one still waiting');
+    assert.ok(!sessions.some((s) => s.name === 'p2'), 'the quietest one went');
+    assert.ok(first.accepted);
+  });
+});
+
+describe('with no window to read', () => {
+  const UUID_A = '3f2a9c1e-7b44-4d2a-9d11-aaaaaaaaaaaa';
+  const UUID_B = '9b1d0e55-0c2f-41c8-8a37-bbbbbbbbbbbb';
+
+  it('lists the session a hook spoke for, where the box used to say there is none', () => {
+    const f = fixture();
+    f.coordinator.refresh();
+    assert.equal(f.transport.framesOfType('state').at(-1).state, 'disconnected');
+
+    const { id } = f.hook('Bash', { command: 'ls' });
+    f.coordinator.refresh();
+
+    const list = f.transport.framesOfType('sessions').at(-1);
+    assert.deepEqual(list.sessions, [{ id: 'c1', name: 'chickenMicro', state: 'waiting_permission' }]);
+    assert.equal(list.focus, 'c1');
+    assert.equal(list.permission, id);
+    assert.equal(f.shown().session, 'c1', 'the request names the session it came from');
+    assert.equal(f.transport.framesOfType('state').at(-1).state, 'waiting_permission');
+  });
+
+  it('is answered through the hook, and goes back to idle rather than to nothing', () => {
+    const f = fixture();
+    const { id, channel } = f.hook('Bash', { command: 'ls' });
+    f.coordinator.refresh();
+    f.arm();
+
+    f.inbound(action('approve', id));
+    assert.equal(channel.lines[0].decision, 'allow');
+    assert.deepEqual(f.source.pressed, []);
+    assert.equal(f.transport.framesOfType('state').at(-1).state, 'idle');
+    assert.deepEqual(f.transport.framesOfType('sessions').at(-1).sessions,
+                     [{ id: 'c1', name: 'chickenMicro', state: 'idle' }]);
+  });
+
+  it('shows two sessions of one folder under names that differ', () => {
+    const f = fixture();
+    f.hooks.submit(request('Bash', { command: 'ls' }, { session: UUID_A }), new FakeChannel());
+    f.hooks.submit(request('Bash', { command: 'pwd' }, { session: UUID_B }), new FakeChannel());
+    f.coordinator.refresh();
+
+    const names = f.transport.framesOfType('sessions').at(-1).sessions.map((s) => s.name);
+    assert.deepEqual(names, ['chickenMicro (3f2a)', 'chickenMicro (9b1d)']);
+  });
+
+  it('names a session by its short id on the wire, never by the id Claude gave it', () => {
+    // Claude's own id is a 36-character UUID; the wire takes 16, and an id it
+    // refuses is an id the box cannot send an action back for.
+    const f = fixture();
+    f.hooks.submit(request('Bash', { command: 'ls' }, { session: UUID_A }), new FakeChannel());
+    f.coordinator.refresh();
+
+    const permission = f.shown();
+    const list = f.transport.framesOfType('sessions').at(-1);
+    assert.equal(permission.session, 'c1');
+    assert.equal(list.focus, permission.session);
+    assert.deepEqual(list.sessions.map((s) => s.id), ['c1']);
+    assert.ok(permission.session.length <= 16);
+  });
+
+  /** Two sessions, both answered, so that both are idle. */
+  function twoIdleSessions() {
+    const f = fixture();
+    const a = f.hooks.submit(request('Bash', { command: 'ls' }, { session: UUID_A }), new FakeChannel());
+    const b = f.hooks.submit(
+      request('Bash', { command: 'pwd' }, { session: UUID_B, cwd: '/Users/me/docs' }),
+      new FakeChannel(),
+    );
+    f.coordinator.refresh();
+    f.arm();
+    f.inbound(action('approve', a.id));
+    f.coordinator.refresh();
+    f.arm();
+    f.inbound(action('approve', b.id));
+    f.coordinator.refresh();
+    return f;
+  }
+
+  it('describes the session that is asking, not the first one listed', () => {
+    const f = twoIdleSessions();
+    assert.deepEqual(f.transport.framesOfType('sessions').at(-1).sessions.map((s) => s.state),
+                     ['idle', 'idle']);
+
+    const { id } = f.hooks.submit(
+      request('Bash', { command: 'id' }, { session: UUID_B, cwd: '/Users/me/docs' }),
+      new FakeChannel(),
+    );
+    f.coordinator.refresh();
+
+    const list = f.transport.framesOfType('sessions').at(-1);
+    assert.equal(list.focus, 'c2');
+    assert.equal(list.permission, id);
+    assert.equal(f.transport.framesOfType('state').at(-1).state, 'waiting_permission');
+  });
+
+  it('follows the session the box picks, when no window is read', () => {
+    const f = twoIdleSessions();
+    assert.equal(f.transport.framesOfType('sessions').at(-1).focus, 'c1');
+
+    f.inbound('{"v":1,"type":"focus","sessionId":"c2"}');
+    assert.equal(f.transport.framesOfType('sessions').at(-1).focus, 'c2');
+    assert.ok(!f.logged.some((line) => /cannot follow/.test(line)));
+
+    // One that is not listed changes nothing, and says so.
+    f.inbound('{"v":1,"type":"focus","sessionId":"c9"}');
+    assert.equal(f.transport.framesOfType('sessions').at(-1).focus, 'c2');
+    assert.ok(f.logged.some((line) => /cannot follow c9/.test(line)));
+  });
+
+  it('goes to the session that asks, even after another was picked', () => {
+    const f = twoIdleSessions();
+    f.inbound('{"v":1,"type":"focus","sessionId":"c2"}');
+
+    f.hooks.submit(request('Bash', { command: 'id' }, { session: UUID_A }), new FakeChannel());
+    f.coordinator.refresh();
+    assert.equal(f.transport.framesOfType('sessions').at(-1).focus, 'c1');
+  });
+
+  it('forgets a session once it has been quiet long enough', () => {
+    const f = fixture();
+    const { id } = f.hook('Bash', { command: 'ls' });
+    f.coordinator.refresh();
+    f.arm();
+    f.inbound(action('approve', id));
+
+    f.clock.now += HOOK_SESSION_TTL_MS + 1000;
+    f.coordinator.refresh();
+    assert.deepEqual(f.transport.framesOfType('sessions').at(-1).sessions, []);
+    assert.equal(f.transport.framesOfType('state').at(-1).state, 'disconnected');
+  });
+
+  it('leaves the list to the windows when there are any', () => {
+    // Nothing connects a hook's session to a window, so listing both would show
+    // one conversation twice.
+    const f = fixture();
+    f.source.tree = fixtures.idle();
+    f.hook('Bash', { command: 'ls' });
+    f.coordinator.refresh();
+
+    const list = f.transport.framesOfType('sessions').at(-1);
+    assert.deepEqual(list.sessions.map((s) => s.id), ['s1']);
+    assert.equal(f.shown().session, undefined, 'the request names no window of its own');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// What hooks say about a session that has asked for nothing: it started, was
+// given a prompt, finished, ended.
+// ---------------------------------------------------------------------------
+
+describe('what hooks say about a session', () => {
+  const SESSION = '3f2a9c1e-7b44-4d2a-9d11-aaaaaaaaaaaa';
+  const OTHER = '9b1d0e55-0c2f-41c8-8a37-bbbbbbbbbbbb';
+  const tell = (r, name, extra = {}) => r.event({
+    name, session: SESSION, cwd: '/Users/me/chickenMicro', entrypoint: 'cli', ...extra,
+  });
+  const clock = () => {
+    const time = { t: 1_000_000 };
+    return { time, registry: new HookRegistry({ now: () => time.t }) };
+  };
+
+  it('lists a session that has asked for nothing', () => {
+    const { registry } = clock();
+    assert.equal(tell(registry, HookEvent.sessionStart), true);
+    assert.deepEqual(registry.sessions().map(({ id, name, state, pending }) => ({ id, name, state, pending })),
+                     [{ id: 'c1', name: 'chickenMicro', state: 'idle', pending: false }]);
+  });
+
+  it('reads thinking from a prompt to the end of the turn', () => {
+    const { time, registry } = clock();
+    tell(registry, HookEvent.sessionStart);
+    tell(registry, HookEvent.prompt);
+    assert.equal(registry.sessions()[0].state, 'thinking');
+
+    tell(registry, HookEvent.stop);
+    assert.equal(registry.sessions()[0].state, 'done');
+    time.t += HOOK_DONE_MS + 1;
+    assert.equal(registry.sessions()[0].state, 'idle', 'done is only shown for a moment');
+  });
+
+  it('does not stay thinking about a turn that ended without a Stop', () => {
+    const { time, registry } = clock();
+    tell(registry, HookEvent.prompt);
+    time.t += HOOK_THINKING_STALE_MS + 1;
+    assert.equal(registry.sessions()[0].state, 'idle');
+  });
+
+  it('keeps thinking through a start that is only a resume or a compaction', () => {
+    const { registry } = clock();
+    tell(registry, HookEvent.prompt);
+    tell(registry, HookEvent.sessionStart);
+    assert.equal(registry.sessions()[0].state, 'thinking');
+  });
+
+  it('forgets a session the moment it ends, however recently it spoke', () => {
+    const { registry } = clock();
+    tell(registry, HookEvent.prompt);
+    tell(registry, HookEvent.sessionEnd);
+    assert.deepEqual(registry.sessions(), []);
+    assert.equal(tell(registry, HookEvent.sessionEnd), false, 'ending twice is not an event');
+  });
+
+  it('comes back, as a new session, with the next prompt', () => {
+    const { registry } = clock();
+    tell(registry, HookEvent.prompt);
+    tell(registry, HookEvent.sessionEnd);
+    tell(registry, HookEvent.prompt);
+    assert.deepEqual(registry.sessions().map((s) => s.id), ['c2']);
+  });
+
+  it('keeps a session through a long quiet, and not for ever', () => {
+    const { time, registry } = clock();
+    tell(registry, HookEvent.sessionStart);
+    time.t += HOOK_SESSION_TTL_MS - 1000;
+    assert.equal(registry.sessions().length, 1);
+    time.t += 2000;
+    assert.deepEqual(registry.sessions(), []);
+  });
+
+  it('is still thinking once a request is answered, when it was thinking before', () => {
+    const { registry } = clock();
+    tell(registry, HookEvent.prompt);
+    const { id } = registry.submit(request('Bash', { command: 'ls' }, { session: SESSION }), new FakeChannel());
+    registry.answer(id, 'allow');
+    assert.equal(registry.sessions()[0].state, 'thinking');
+  });
+
+  it('knows nothing between two requests of a session that sent no events', () => {
+    const { registry } = clock();
+    const { id } = registry.submit(request('Bash', { command: 'ls' }, { session: SESSION }), new FakeChannel());
+    registry.answer(id, 'allow');
+    assert.equal(registry.sessions()[0].state, 'idle');
+  });
+
+  it('is deaf to events when the box answers through the interface', () => {
+    const { registry } = clock();
+    registry.setMode('ui');
+    assert.equal(tell(registry, HookEvent.prompt), false);
+    assert.deepEqual(registry.sessions(), []);
+  });
+
+  it('never lists a headless run, whatever it says', () => {
+    const { registry } = clock();
+    assert.equal(tell(registry, HookEvent.prompt, { entrypoint: 'sdk-cli' }), false);
+    registry.submit(request('Bash', { command: 'ls' }, { session: OTHER, entrypoint: 'sdk-ts' }),
+                    new FakeChannel());
+    assert.deepEqual(registry.sessions(), []);
+    assert.deepEqual(registry.sessions(undefined, { windowsRead: true }), []);
+  });
+
+  describe('beside the windows of Claude Desktop', () => {
+    it('lists a terminal or an editor, and not what Desktop already shows', () => {
+      const { registry } = clock();
+      tell(registry, HookEvent.prompt, { session: 'term', cwd: '/w/a', entrypoint: 'cli' });
+      tell(registry, HookEvent.prompt, { session: 'edit', cwd: '/w/b', entrypoint: 'claude-vscode' });
+      tell(registry, HookEvent.prompt, { session: 'desk', cwd: '/w/c', entrypoint: 'claude-desktop' });
+      tell(registry, HookEvent.prompt, { session: 'old', cwd: '/w/d', entrypoint: '' });
+
+      assert.deepEqual(registry.sessions(undefined, { windowsRead: true }).map((s) => s.name), ['a', 'b']);
+      assert.deepEqual(registry.sessions().map((s) => s.name), ['a', 'b', 'c', 'd'],
+                       'with no window read, nothing is shown twice, so all are listed');
+    });
+
+    it('does not tag a name because of a session that is left out', () => {
+      const { registry } = clock();
+      tell(registry, HookEvent.prompt, { session: 'term', cwd: '/w/app', entrypoint: 'cli' });
+      tell(registry, HookEvent.prompt, { session: 'desk', cwd: '/w/app', entrypoint: 'claude-desktop' });
+      assert.deepEqual(registry.sessions(undefined, { windowsRead: true }).map((s) => s.name), ['app']);
+    });
+  });
+
+  it('sorts where a session runs', () => {
+    assert.equal(frontEndOf('cli'), 'own');
+    assert.equal(frontEndOf('claude-vscode'), 'own');
+    assert.equal(frontEndOf('claude-desktop'), 'desktop');
+    assert.equal(frontEndOf('claude-desktop-3p'), 'desktop');
+    assert.equal(frontEndOf('sdk-cli'), 'headless');
+    assert.equal(frontEndOf('sdk-ts'), 'headless');
+    assert.equal(frontEndOf('local-agent'), 'headless');
+    assert.equal(frontEndOf('claude-in-slack'), 'headless');
+    assert.equal(frontEndOf(''), 'unknown');
+  });
+});
+
+describe('sessions beside the windows', () => {
+  const SESSION = '3f2a9c1e-7b44-4d2a-9d11-aaaaaaaaaaaa';
+  const tell = (f, name, extra = {}) => f.hooks.event({
+    name, session: SESSION, cwd: '/Users/me/docs', entrypoint: 'cli', ...extra,
+  });
+  const states = (f) => f.transport.framesOfType('sessions').at(-1);
+
+  it('lists a terminal session after the windows, though it never asked for anything', () => {
+    const f = fixture();
+    f.source.tree = fixtures.idle();
+    tell(f, HookEvent.prompt);
+    f.coordinator.refresh();
+
+    assert.deepEqual(states(f).sessions.map((s) => [s.id, s.state]), [['s1', 'idle'], ['c1', 'thinking']]);
+    assert.equal(states(f).sessions[1].name, 'docs');
+  });
+
+  it('shows a session that Desktop shows once', () => {
+    const f = fixture();
+    f.source.tree = fixtures.idle();
+    tell(f, HookEvent.prompt, { entrypoint: 'claude-desktop' });
+    f.coordinator.refresh();
+    assert.deepEqual(states(f).sessions.map((s) => s.id), ['s1']);
+  });
+
+  it('keeps describing the window in front until a terminal session asks', () => {
+    const f = fixture();
+    f.source.tree = fixtures.idle();
+    tell(f, HookEvent.prompt);
+    f.coordinator.refresh();
+    assert.equal(states(f).focus, 's1');
+
+    const { id } = f.hooks.submit(
+      request('Bash', { command: 'ls' }, { session: SESSION, cwd: '/Users/me/docs', entrypoint: 'cli' }),
+      new FakeChannel(),
+    );
+    f.coordinator.refresh();
+    assert.equal(states(f).focus, 'c1');
+    assert.equal(states(f).permission, id);
+    assert.equal(f.shown().session, 'c1', 'the request names the session it came from');
+    assert.equal(f.transport.framesOfType('state').at(-1).state, 'waiting_permission');
+
+    f.arm();
+    f.inbound(action('approve', id));
+    f.coordinator.refresh();
+    assert.equal(states(f).focus, 's1', 'answered, the box goes back to the window in front');
+  });
+
+  it('follows the terminal session the box picks, and a window when it picks one back', () => {
+    const f = fixture();
+    f.source.tree = fixtures.idle();
+    tell(f, HookEvent.prompt);
+    f.coordinator.refresh();
+
+    f.inbound('{"v":1,"type":"focus","sessionId":"c1"}');
+    assert.equal(states(f).focus, 'c1');
+    assert.equal(f.transport.framesOfType('state').at(-1).state, 'thinking');
+
+    f.coordinator.refresh();
+    assert.equal(states(f).focus, 'c1', 'it stays picked across a re-read');
+
+    f.inbound('{"v":1,"type":"focus","sessionId":"s1"}');
+    assert.equal(states(f).focus, 's1');
+    f.coordinator.refresh();
+    assert.equal(states(f).focus, 's1');
+  });
+
+  it('presses nothing in a window when STOP is pressed on a terminal session', () => {
+    const f = fixture();
+    f.source.tree = fixtures.workspace([
+      { name: 'one', tree: fixtures.thinking('first', 'a.') },
+    ]);
+    tell(f, HookEvent.prompt);
+    f.coordinator.refresh();
+
+    f.inbound('{"v":1,"type":"action","action":"stop","sessionId":"c1"}');
+    assert.deepEqual(f.source.pressed, [], 'the window being followed is a different conversation');
+
+    f.inbound('{"v":1,"type":"action","action":"stop","sessionId":"s1"}');
+    assert.deepEqual(f.source.pressed, ['a.stop']);
+  });
+
+  it('drops a session from the list when it ends', () => {
+    const f = fixture();
+    f.source.tree = fixtures.idle();
+    tell(f, HookEvent.prompt);
+    f.coordinator.refresh();
+    tell(f, HookEvent.sessionEnd);
+    f.coordinator.refresh();
+    assert.deepEqual(states(f).sessions.map((s) => s.id), ['s1']);
+  });
+
+  it('shows a turn ending as done, then idle', () => {
+    const f = fixture();
+    f.source.tree = fixtures.idle();
+    tell(f, HookEvent.prompt);
+    tell(f, HookEvent.stop);
+    f.coordinator.refresh();
+    assert.equal(states(f).sessions[1].state, 'done');
+
+    f.clock.now += HOOK_DONE_MS + 1;
+    f.coordinator.refresh();
+    assert.equal(states(f).sessions[1].state, 'idle');
   });
 });

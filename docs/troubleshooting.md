@@ -695,6 +695,60 @@ until Claude moved on. If you see that line in an old log, that is what it was.
 
 ---
 
+## Claude Code in a terminal or in VS Code
+
+These sessions are known and answered through hooks alone: no Accessibility grant,
+no Claude Desktop window. When one is missing from the box, or nothing reaches it,
+go down this list.
+
+1. **Is the daemon up, and is it listening for hooks?** `claude-remote doctor` says
+   so (`a daemon is listening for hooks`). The daemon log says
+   `[HOOK] listening on …/hook.sock` at start.
+2. **Did it start hook-only?** With no Accessibility grant it logs
+   `answering Claude Code hooks only: … because …`. That is normal for these
+   sessions; it only means Claude Desktop's windows are not read.
+3. **Is the plugin the current one, in a session started after it?** Hooks come from
+   the plugin copy Claude Code keeps in `~/.claude/plugins/cache/`, not from this
+   folder, so a change here reaches Claude Code only as a new plugin version
+   (`claude plugin list` shows the installed one; it has to be 0.2.0 or later to
+   report sessions, not only permissions). The update is `claude plugin marketplace
+   update chickenmicro` then `claude plugin update chickenmicro-permissions@chickenmicro`,
+   and a session that was already running only takes it after `/reload-plugins`,
+   or once restarted.
+4. **Is the hook installed for every project?** Put it in `~/.claude/settings.json`
+   or install the plugin at user level (`claude-remote hook-config` prints the
+   block). A hook in one project's `.claude/settings.local.json` reaches that
+   project only.
+5. **Does a request reach the daemon?** Ask Claude for something that needs a
+   permission and look for `[HOOK] request hN: …`. Two other lines mean the hook ran
+   and was turned away: `request stood down: the box answers through the interface`
+   — set the box's **Answer via** back to *hook, then window*, because a session
+   with no window has no other way in — and `request stood down: too many requests
+   are waiting`, which clears as the waiting ones are answered or time out. If none
+   of the three appears, the hook did not run or did not find `node`.
+6. **VS Code and `node`.** An editor opened from the Dock often has no `node` on its
+   `PATH`. The launcher takes the one the daemon left in `~/.claude-remote/node`, so
+   start the daemon at least once after updating; if that file is missing the hook
+   stands down without a word. The daemon leaves it only in a folder no one else
+   can write to — with `--hook-socket` pointing into a shared folder such as `/tmp`
+   it says so in the log and the launcher uses the `PATH` instead.
+7. **A session is not on the box.** Start it, send a prompt, and run the daemon with
+   `--log debug`: each event shows as `[HOOK] SessionStart in …` or
+   `UserPromptSubmit in …`. None means the hooks did not run (items 3 to 6). With
+   Claude Desktop's windows read, only a session that says it runs in a terminal or
+   an editor is listed — a Code-tab conversation in Desktop is already one of the
+   windows. A session that ended, or was quiet for two hours, is dropped; its next
+   prompt brings it back. The box shows eight sessions at most, windows included.
+8. **It says *idle* while Claude works, or *thinking* when it has stopped.** The box
+   only knows what hooks tell it: a prompt starts a turn and `Stop` ends it. A turn
+   interrupted with Esc may not send `Stop`, and the box then reads *idle* again
+   fifteen minutes later.
+9. **STOP does nothing.** There is no button to press for a session without a
+   window, so the key has nothing to act on there, and it does not stop the window
+   being followed either.
+
+---
+
 ## One-time codes
 
 ### `NO CLOCK`, refused codes, the setup Wi-Fi
@@ -731,7 +785,11 @@ cd mac && npm install
 ```
 
 `ports`, `simulate` and `help` load the Accessibility modules lazily, so they
-still work if koffi is missing — `dump`, `run` and `doctor` do not.
+still work if koffi is missing. So do `run` and `doctor`: `run` carries on
+answering Claude Code hooks only, and says so in its log
+(`answering Claude Code hooks only: … its native module did not load`) unless you
+pass `--accessibility`, which refuses to start; `doctor` prints
+`[--] could not load the Accessibility bindings`. `dump` and `sessions` need koffi.
 
 ### Running the Mac test suite
 

@@ -494,9 +494,12 @@ follows four rules:
 ## 10. The hook channel (Mac-local)
 
 A Claude Code `PermissionRequest` hook can hand the daemon a request and wait for
-the box to answer it. This is **not** part of the serial protocol: it is a Unix
-socket on the Mac, and the box never sees it. The box sees only the `permission`
-frame the daemon builds from it, and answers with the usual `action`.
+the box to answer it. Four more hooks — `SessionStart`, `UserPromptSubmit`, `Stop`
+and `SessionEnd` — only tell the daemon what a session is doing. This is **not**
+part of the serial protocol: it is a Unix socket on the Mac, and the box never sees
+it. The box sees only the `permission` frame the daemon builds from a request, the
+`sessions` frame it builds from what the hooks said, and answers with the usual
+`action`.
 
 **Transport.** A Unix socket, `~/.claude-remote/hook.sock` by default
 (`CLAUDE_REMOTE_SOCKET` or `--hook-socket` override it, for the hook and the daemon
@@ -507,8 +510,22 @@ lines of at most 65 536 bytes.
 **Hook → daemon**, one line, then the hook waits:
 
 ```json
-{"v":1,"type":"request","tool":"Bash","session":"<claude session id>","cwd":"/Users/me/proj","input":{"command":"git push"}}
+{"v":1,"type":"request","tool":"Bash","session":"<claude session id>","cwd":"/Users/me/proj","entrypoint":"cli","input":{"command":"git push"}}
 ```
+
+`entrypoint` is `CLAUDE_CODE_ENTRYPOINT`, the front-end that started the session
+(`cli`, `claude-vscode`, `claude-desktop`, `sdk-cli`…); it is `""` when Claude Code
+did not set it. The daemon uses it only to decide which sessions to list (rule 7).
+
+**Hook → daemon, an event.** One line, and the hook does not wait: the daemon takes
+it, closes, and answers nothing.
+
+```json
+{"v":1,"type":"event","event":"UserPromptSubmit","session":"<claude session id>","cwd":"/Users/me/proj","entrypoint":"cli"}
+```
+
+`event` is one of `SessionStart`, `UserPromptSubmit`, `Stop`, `SessionEnd`. The
+prompt, the transcript and everything else Claude Code hands a hook are not sent.
 
 **Daemon → hook**, one line, then the daemon closes:
 
@@ -535,6 +552,37 @@ so Claude's own dialog stays in charge. Nothing here ever answers for the user:
    dialog as it always did, after a grace of 0.6 s if hooks have recently been
    seen. A hook that times out hands its dialog straight back.
 6. **The mode.** With `mode: "ui"` every request is answered `cancel` at once.
+7. **Sessions without a window.** A terminal or VS Code session has no window to
+   read, so the daemon lists the sessions its hooks have spoken for in the
+   `sessions` frame, after any window, with ids of the form `cN` (a Claude session
+   id is a UUID, and the wire allows 16 characters). A session is known from its
+   first event or request, so it is listed before it has asked for anything.
+   - *Which.* With no Claude Desktop window read, all of them. With windows read,
+     only those whose `entrypoint` is a terminal or an editor: a conversation in
+     Claude Desktop's Code tab is already one of the windows, and nothing else
+     connects the two. One whose `entrypoint` is empty is left out then. Headless
+     runs (`sdk-*`) are never listed.
+   - *State.* `waiting_permission` while a request is pending. Otherwise `thinking`
+     from a `UserPromptSubmit` to its `Stop`, then `done` for a few seconds, then
+     `idle`. A session that sent no event but requests is `idle` between them. After
+     fifteen minutes with nothing heard, `thinking` reads `idle`.
+   - *Leaving.* `SessionEnd` removes a session at once. One that cannot say — a
+     killed terminal — is dropped after two hours without a word.
+   - *Size.* The list holds at most `SESSIONS_MAX` (8), windows included: the
+     quietest hook session goes first, never one with a request pending.
+   - *Following.* A `focus` frame naming one selects it, and picking a window
+     selects that instead. The session asking still wins while it is asking.
+     `stop` on one presses nothing: it has no button to press, and must not stop
+     the window being followed.
+   - *Mode.* With `mode: "ui"` events are ignored, like requests.
+
+The daemon also leaves the path of its own `node` in a file called `node` beside the
+socket, so that a hook started with a bare `PATH` — VS Code opened from the Dock —
+can still run. A hook's launcher runs what that file names, so the daemon writes it
+only into a directory that belongs to its user and that no one else can write to,
+replaces whatever stood there rather than writing through it, and the launcher
+takes it only if the file is the user's own and holds a full path. Failing that, the
+launcher uses the `PATH`.
 
 A request and the dialog drawn for it are matched by the text they share (the
 command, the file path, the URL). A match that fails costs two entries on the box,

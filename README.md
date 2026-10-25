@@ -613,6 +613,8 @@ bound — before any hardware is involved.
 | `--no-prompt` | do not trigger the macOS Accessibility prompt |
 | `--hook-socket <path>` | `run`: where Claude Code hooks connect (default `~/.claude-remote/hook.sock`) |
 | `--no-hook` | `run`: do not listen for hooks; answer by pressing Claude's buttons only |
+| `--no-accessibility` | `run`: never read Claude Desktop's windows or load the native module; answer Claude Code hooks only |
+| `--accessibility` | `run`: refuse to start without the Accessibility grant, as it used to (the default is to carry on hook-only) |
 
 ---
 
@@ -631,6 +633,46 @@ not answer. The menu's **Answer via** entry picks which way the box wants them
 answered — through the hook with the window as the fallback, or the window only —
 and announces it in a `mode` frame
 ([PROTOCOL.md §10](protocol/PROTOCOL.md#10-the-hook-channel-mac-local)).
+
+### In a terminal or in VS Code
+
+Claude Code in a terminal and in the VS Code extension has no window for the daemon
+to read, so hooks are the whole integration there — and they need no Accessibility
+grant. The daemon notices on its own: with no grant, or with `--no-accessibility`,
+it logs why and answers hooks only. With the grant, and Claude Desktop open, it does
+both: the windows are read as before, and terminal and editor sessions are listed
+beside them.
+
+1. Run the daemon: `node bin/claude-remote.js run` from `mac/`.
+2. Install the hooks for every session, whichever app starts it: the
+   [plugin](plugin/README.md), or `node bin/claude-remote.js hook-config` and merge
+   what it prints into `~/.claude/settings.json`. The launcher finds `node` through
+   the daemon, so an editor opened from the Dock needs no `PATH` set up. Sessions
+   that were already running do not have the hooks yet: run `/reload-plugins` in
+   them, or restart them.
+3. Start a session. It shows up on the box at once, under its folder name, before it
+   has asked for anything. Ask Claude for something that needs a permission: it
+   reaches the box as soon as the hook sends it, and ✓ or ✕ answers it.
+
+What the box shows for these sessions: *thinking* from a prompt to the end of the
+turn, *done* for a moment, then *idle*, and *waiting* while a request is pending.
+A session that ends leaves the list at once; one that cannot say so (a killed
+terminal) leaves after two hours. Two with the same folder name get the first
+characters of their id. The box lists eight sessions at most, windows included; if
+more are running the quietest hook sessions go first, never one that is waiting.
+The session asking is the one the box describes; when none is, the one you picked
+with the keys. **STOP** has nothing to press in a terminal or an editor.
+
+A conversation in Claude Desktop's Code tab is already one of the windows, so it is
+not listed a second time: the hook says which front-end started the session
+(`CLAUDE_CODE_ENTRYPOINT`), and only terminal and editor sessions are added beside
+the windows. A hook from an older plugin does not say, so it is listed only when no
+window is read at all. Claude Code does not document that variable: `claude-desktop`
+was seen in the Code tab, and `cli` and `claude-vscode` are the values its telemetry
+documents. If a terminal or an editor session does not show up while Desktop's
+windows are read, check this first (`--log debug` shows what each event carried).
+
+`claude-remote doctor` says whether a daemon is listening for hooks.
 
 ---
 

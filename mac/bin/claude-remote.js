@@ -8,16 +8,20 @@
 
 import process from 'node:process';
 import { statSync } from 'node:fs';
+import net from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { Log, LogTag } from '../src/log.js';
 import { parseArguments } from '../src/cli/args.js';
+import { shellQuote } from '../src/cli/shellQuote.js';
 import { DEFAULT_TREE_DEPTH } from '../src/accessibility/axNode.js';
 import { UNEXPOSED_TREE_NODES, refusalMessage } from '../src/accessibility/readiness.js';
 import { LogFile, defaultLogPath } from '../src/system/logFile.js';
+import { chooseAccessibility } from '../src/accessibility/choose.js';
+import { NullAccessibilitySource } from '../src/accessibility/nullSource.js';
 import { HookRegistry } from '../src/hook/registry.js';
-import { HookServer } from '../src/hook/server.js';
+import { HookServer, defaultSocketPath } from '../src/hook/server.js';
 import { DEFAULT_APPROVE_DELAY_MS } from '../src/protocol/constants.js';
 import { ClaudeState } from '../src/protocol/enums.js';
 import { encode } from '../src/protocol/frames.js';
@@ -62,6 +66,10 @@ OPTIONS
                               (default: ~/.claude-remote/hook.sock)
   --no-hook                   run: do not listen for hooks; answer by pressing
                               Claude's buttons only
+  --no-accessibility          run: never read Claude Desktop's windows; answer
+                              Claude Code hooks only (terminal, VS Code)
+  --accessibility             run: refuse to start without the Accessibility
+                              grant, as before (default: carry on hook-only)
   --stdout                    simulate: print frames instead of using serial
   --no-prompt                 do not open the macOS Accessibility settings pane
 
@@ -142,13 +150,15 @@ function makeCoordinator(transport, source, hooks = null) {
 /**
  * Starts listening for Claude Code hooks, or says why it cannot.
  *
- * A daemon that cannot take hooks is still a working daemon: it answers by
- * pressing Claude's buttons, exactly as it did before hooks existed. So a
- * failure here is a warning, never a reason not to run.
+ * A daemon that cannot take hooks is still a working daemon as long as it reads
+ * Claude Desktop's windows: it answers by pressing Claude's buttons, exactly as
+ * it did before hooks existed. So a failure here is a warning — and a reason not
+ * to run only for a daemon with no windows to read, which `commandRun` checks.
  */
-async function startHooks() {
+async function startHooks({ windows = true } = {}) {
+  const fallback = windows ? ': answering through the interface only' : '';
   if (args.has('--no-hook')) {
-    log.info(LogTag.hook, 'hooks are off (--no-hook): answering through the interface only');
+    log.info(LogTag.hook, `hooks are off (--no-hook)${fallback}`);
     return { registry: null, server: null };
   }
   const registry = new HookRegistry();
@@ -161,8 +171,8 @@ async function startHooks() {
     await server.start();
     return { registry, server };
   } catch (error) {
-    log.warn(LogTag.hook, `no hook channel (${error.message}): answering through the interface only`);
-    return { registry: null, server: null };
+    log.warn(LogTag.hook, `no hook channel (${error.message})${fallback}`);
+    return { registry: null, server: null, error };
   }
 }
 
@@ -328,29 +338,84 @@ async function commandSessions() {
   return status;
 }
 
-async function commandRun() {
-  const ax = await accessibility();
-  if (!ax.ensureTrusted(log, { prompt: !args.has('--no-prompt') })) return 2;
+/** How often a hook-only daemon looks again: only timers and hook arrivals change anything. */
+const HOOK_ONLY_REFRESH_MS = 1000;
 
-  const source = new ax.LiveAccessibilitySource({ log });
-  const transport = makeTransport();
-  const hooks = await startHooks();
-  const coordinator = makeCoordinator(transport, source, hooks.registry);
-  const watcher = new ax.ClaudeWatcher({
-    source,
-    log,
-    onChange: () => coordinator.refresh(),
-    pollIntervalMs: args.int('--poll') ?? 250,
+async function commandRun() {
+  // Reading Claude Desktop's windows is an extra, not a requirement: Claude Code in
+  // a terminal or in VS Code is answered through its hook alone. So a missing grant
+  // is a reason to say so and carry on, unless --accessibility asks for the old
+  // behaviour of refusing to start without it.
+  const choice = await chooseAccessibility({
+    off: args.has('--no-accessibility'),
+    load: accessibility,
   });
+  if (!choice.trusted && args.has('--accessibility')) {
+    if (choice.module !== null) {
+      choice.module.ensureTrusted(log, { prompt: !args.has('--no-prompt') });
+    } else {
+      process.stderr.write(`Accessibility was asked for with --accessibility, but ${choice.why}.\n`);
+    }
+    return 2;
+  }
+  const hookOnly = !choice.trusted;
+  if (hookOnly && args.has('--no-hook')) {
+    // Through the log, so a daemon that keeps being restarted leaves the reason in
+    // its file too, and --log error cannot hide it.
+    log.error(
+      LogTag.hook,
+      `nothing to answer with: hooks are off (--no-hook) and Accessibility is unavailable (${choice.why})`,
+    );
+    return 2;
+  }
+  if (hookOnly) {
+    log.info(
+      LogTag.ax,
+      `answering Claude Code hooks only: Claude Desktop's windows are not read, because ${choice.why}`,
+    );
+  }
+
+  const source = hookOnly
+    ? new NullAccessibilitySource()
+    : new choice.module.LiveAccessibilitySource({ log });
+  const transport = makeTransport();
+  const hooks = await startHooks({ windows: !hookOnly });
+  if (hookOnly && hooks.server === null) {
+    // The hook channel is the only way in. A daemon that cannot open it would sit
+    // there reporting itself as running, and take the serial port from a working one.
+    source.dispose();
+    log.error(
+      LogTag.hook,
+      `nothing to answer with: the hook channel did not start (${hooks.error?.message ?? 'unknown'}) `
+      + `and Accessibility is unavailable (${choice.why})`,
+    );
+    return 2;
+  }
+  const coordinator = makeCoordinator(transport, source, hooks.registry);
+  // With no windows there is nothing to poll for: a slow tick covers the timers
+  // (settling, expiry) and the hooks wake the coordinator themselves.
+  const watcher = hookOnly
+    ? null
+    : new choice.module.ClaudeWatcher({
+      source,
+      log,
+      onChange: () => coordinator.refresh(),
+      pollIntervalMs: args.int('--poll') ?? 250,
+    });
+  const refresher = hookOnly
+    ? setInterval(() => coordinator.refresh(), args.int('--poll') ?? HOOK_ONLY_REFRESH_MS)
+    : null;
+  refresher?.unref?.();
 
   coordinator.start();
-  watcher.start();
+  watcher?.start();
   log.info(LogTag.session, `claude-remote ${VERSION} running; Ctrl-C to stop`);
   if (log.filePath !== null) log.info(LogTag.session, `keeping a log in ${log.filePath}`);
 
   runUntilInterrupted(() => {
     log.info(LogTag.session, 'shutting down');
-    watcher.stop();
+    watcher?.stop();
+    if (refresher !== null) clearInterval(refresher);
     hooks.server?.stop();
     coordinator.stop();
     source.dispose();
@@ -392,6 +457,20 @@ function commandSimulate() {
   return 0;
 }
 
+/** Whether something is listening on the hook socket. It sends nothing and hangs up. */
+function socketAnswers(path) {
+  return new Promise((resolve) => {
+    const probe = net.connect(path);
+    const done = (answered) => {
+      probe.destroy();
+      resolve(answered);
+    };
+    probe.once('connect', () => done(true));
+    probe.once('error', () => done(false));
+    setTimeout(() => done(false), 500).unref?.();
+  });
+}
+
 async function commandDoctor() {
   let problems = 0;
   console.log(`claude-remote ${VERSION} — environment check\n`);
@@ -401,15 +480,15 @@ async function commandDoctor() {
     ax = await accessibility();
     console.log('[ok] native Accessibility bindings loaded (koffi)');
   } catch (error) {
-    problems += 1;
-    console.log('[!!] could not load the Accessibility bindings');
+    // Only reading Claude Desktop needs them: the terminal and VS Code do not.
+    console.log('[--] could not load the Accessibility bindings (Claude Desktop is not read)');
     console.log(`     ${error.message}`);
   }
 
   if (ax) {
     const trusted = ax.isTrusted();
     const responsible = ax.responsibleProcess();
-    console.log(`[${trusted ? 'ok' : '!!'}] Accessibility permission`);
+    console.log(`[${trusted ? 'ok' : '--'}] Accessibility permission${trusted ? '' : ' — not granted'}`);
     console.log(`     this process: ${ax.executablePath()}`);
     if (responsible) {
       // macOS attributes the request to the launching app, not to node.
@@ -419,8 +498,9 @@ async function commandDoctor() {
       console.log('     launched by:  (no parent app — the grant lands on the binary itself)');
     }
     if (!trusted) {
-      problems += 1;
-      console.log('     grant it in System Settings > Privacy & Security > Accessibility');
+      console.log('     not needed for the terminal or VS Code, which are answered through the hook;');
+      console.log('     to read Claude Desktop, grant it in System Settings > Privacy & Security >');
+      console.log('     Accessibility');
     }
 
     const running = ax.findClaudeProcesses();
@@ -432,9 +512,8 @@ async function commandDoctor() {
       }
       console.log(`     ${target.path}`);
     } else {
-      problems += 1;
-      console.log('[!!] Claude Desktop not running');
-      console.log('     open it before `claude-remote run`');
+      console.log('[--] Claude Desktop not running');
+      console.log('     only needed to answer its windows; the terminal and VS Code do not need it');
     }
 
     if (trusted && target) {
@@ -465,6 +544,16 @@ async function commandDoctor() {
       source.dispose();
     }
   }
+
+  // The channel Claude Code in a terminal or in VS Code is answered through.
+  const socketPath = args.value('--hook-socket') ?? defaultSocketPath();
+  if (await socketAnswers(socketPath)) {
+    console.log('[ok] a daemon is listening for hooks');
+  } else {
+    console.log('[--] no daemon is listening for hooks');
+    console.log('     `claude-remote run` starts it; the terminal and VS Code are answered through it');
+  }
+  console.log(`     ${socketPath}`);
 
   // Where to look after the fact: the warning that explains a bad evening is
   // logged once, long before anyone reads it.
@@ -507,22 +596,30 @@ async function commandDoctor() {
 function commandHookConfig() {
   const script = resolve(
     dirname(fileURLToPath(import.meta.url)),
-    '../../plugin/chickenmicro-permissions/bin/permission-hook.mjs',
+    '../../plugin/chickenmicro-permissions/bin/permission-hook.sh',
   );
+  // Claude Code runs the command through a shell, and a checkout can sit in a
+  // folder whose name that shell would otherwise expand.
+  const command = `/bin/sh ${shellQuote(script)}`;
+  // A permission waits for a key on the box, so it may take long; the others only
+  // tell the daemon what a session is doing, and take a moment.
+  const hooks = (timeout) => [{ type: 'command', command, timeout }];
   const settings = {
     hooks: {
-      PermissionRequest: [{
-        matcher: '*',
-        hooks: [{ type: 'command', command: `node "${script}"`, timeout: 120 }],
-      }],
+      PermissionRequest: [{ matcher: '*', hooks: hooks(120) }],
+      SessionStart: [{ hooks: hooks(5) }],
+      UserPromptSubmit: [{ hooks: hooks(5) }],
+      Stop: [{ hooks: hooks(5) }],
+      SessionEnd: [{ hooks: hooks(5) }],
     },
   };
   console.log(JSON.stringify(settings, null, 2));
   process.stderr.write(
-    '\nMerge the "hooks" block above into ~/.claude/settings.json (every project) or a\n'
-    + "project's .claude/settings.local.json (that one). It needs `node` on the PATH Claude\n"
-    + 'Code runs hooks with. With the daemon stopped, or the box set to the interface, the\n'
-    + 'hook decides nothing and the dialog works as usual.\n',
+    '\nMerge the "hooks" block above into ~/.claude/settings.json (every project, in the\n'
+    + "terminal and in VS Code alike) or a project's .claude/settings.local.json (that\n"
+    + 'one). The launcher finds node on its own, from the daemon, so VS Code needs no PATH\n'
+    + 'set up. With the daemon stopped, or the box set to the interface, the hook decides\n'
+    + 'nothing and the dialog works as usual.\n',
   );
   return 0;
 }

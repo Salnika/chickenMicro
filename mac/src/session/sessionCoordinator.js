@@ -67,6 +67,8 @@ export class SessionCoordinator {
    * existed.
    */
   #hooks;
+  /** The hook session the operator picked on the box, when no window is read. */
+  #hookChoice = null;
   /** When each dialog the interpreter reads was first seen, by request id. */
   #axSeen = new Map();
   #refreshQueued = false;
@@ -181,10 +183,16 @@ export class SessionCoordinator {
     // front instead had the state flip between two conversations whenever the
     // operator changed window — and answering a request left the box on a
     // session they never chose. A session picked on the box still wins.
-    const followed = permission && !view.selected
+    const windowFollowed = permission && !view.selected
       ? view.sessions.find((session) => session.id === permission.sessionId) ?? view.focused
       : view.focused;
-    const snapshot = followed?.snapshot ?? EMPTY_SNAPSHOT;
+    // A terminal or VS Code session has no window, so the box learns of it from its
+    // hooks. They are listed beside the windows, and described instead of "no
+    // session" when there is no window at all.
+    const hookSessions = this.#hookSessions(view);
+    const hookCurrent = this.#hookCurrent(hookSessions, permission, view, windowFollowed);
+    const followed = hookCurrent ? null : windowFollowed;
+    const snapshot = followed?.snapshot ?? hookCurrent?.snapshot ?? EMPTY_SNAPSHOT;
     this.#notePressOutcome(permission);
 
     // Frame order matters on e-ink. The permission screen has priority on the
@@ -204,16 +212,20 @@ export class SessionCoordinator {
 
     // The session list is level-triggered: it names the permission the daemon
     // considers active, so the device can reconcile even if a clear was lost.
-    const sessionsLine = encode.sessions(
-      view.sessions.map((session) => ({
+    const listed = [
+      ...view.sessions.map((session) => ({
         id: session.id,
         name: session.name,
         state: session.snapshot.state,
       })),
-      { focus: followed?.id ?? null, permission: permission?.request.id ?? null },
+      ...hookSessions.map(({ id, name, state }) => ({ id, name, state })),
+    ];
+    const sessionsLine = encode.sessions(
+      listed,
+      { focus: followed?.id ?? hookCurrent?.id ?? null, permission: permission?.request.id ?? null },
     );
     if (sessionsLine !== previous?.sessionsLine) {
-      this.#logSessions(view);
+      this.#logSessions(view, hookSessions);
       this.send(sessionsLine);
     }
 
@@ -402,6 +414,9 @@ export class SessionCoordinator {
 
     const hooks = this.#hooks;
     if (hooks === null) return pending.map(fromDialog);
+    // The box lists some hook sessions itself (see #hookSessions), so a request
+    // from one of them can name the session it came from.
+    const listedHookSessions = new Set(this.#hookSessions(view).map((session) => session.id));
 
     const seen = new Map();
     for (const session of pending) {
@@ -433,8 +448,8 @@ export class SessionCoordinator {
             content: entry.content,
             actions: [DeviceAction.deny, DeviceAction.approve],
           },
-          sessionId: owner?.id ?? null,
-          sessionName: owner?.name ?? entry.sessionName,
+          sessionId: owner?.id ?? (listedHookSessions.has(entry.sessionId) ? entry.sessionId : null),
+          sessionName: owner?.name ?? hooks.nameFor(entry, now),
           bindings: new Map(),
         },
       };
@@ -474,18 +489,59 @@ export class SessionCoordinator {
     timer?.unref?.();
   }
 
-  #logSessions(view) {
-    if (view.sessions.length === 0) {
+  /**
+   * The Claude Code sessions the box lists that are not Claude Desktop windows.
+   *
+   * A terminal or VS Code session has no window, so its hooks are the only way the
+   * box learns it exists. With no window read at all, every session a hook has
+   * spoken for is listed. With windows read, only those that said they run in a
+   * terminal or an editor: a Code-tab conversation in Claude Desktop is already one
+   * of the windows, and nothing connects the two, so it would be listed twice.
+   */
+  #hookSessions(view) {
+    if (this.#hooks === null) return [];
+    const windowsRead = view.sessions.length > 0;
+    return this.#hooks.sessions(this.#now(), { windowsRead }).map((session) => ({
+      ...session,
+      // Waiting on the box beats whatever else it is doing.
+      state: session.pending ? ClaudeState.waitingPermission : session.state,
+    }));
+  }
+
+  /**
+   * The hook session the box describes, or null when it describes a window.
+   *
+   * Whichever is asking: everything around a question describes the session that
+   * asked it. Else the one the operator picked on the box. Else, with no window to
+   * describe, the first that is waiting, or the first. A window the operator picked
+   * keeps the box, as it always did.
+   */
+  #hookCurrent(hookSessions, permission, view, windowFollowed) {
+    if (hookSessions.length === 0 || view.selected) return null;
+    const current = hookSessions.find((session) => session.id === permission?.sessionId)
+      ?? hookSessions.find((session) => session.id === this.#hookChoice)
+      ?? (windowFollowed ? null : hookSessions.find((session) => session.pending) ?? hookSessions[0]);
+    if (!current) return null;
+    return {
+      id: current.id,
+      snapshot: { state: current.state, detail: null, lastMessage: null, permission: null },
+    };
+  }
+
+  #logSessions(view, hookSessions = []) {
+    if (view.sessions.length === 0 && hookSessions.length === 0) {
       this.#log.info(LogTag.session, 'no Claude Desktop window open');
       return;
     }
     // Each id is painted in its own colour, so the list is a legend for every
     // `[SESSION s2]` line that follows.
-    const listed = view.sessions
-      .map((session) => `${this.#log.paint(session.id)}:${session.name} ${session.snapshot.state}`)
-      .join(', ');
+    const windows = view.sessions
+      .map((session) => `${this.#log.paint(session.id)}:${session.name} ${session.snapshot.state}`);
+    const hooks = hookSessions
+      .map((session) => `${this.#log.paint(session.id)}:${session.name} ${session.state}`);
     const following = view.focusId ? this.#log.paint(view.focusId) : '-';
-    this.#log.info(LogTag.session, `sessions ${listed} (following ${following})`);
+    const from = view.sessions.length === 0 ? ' (from Claude Code hooks)' : ` (following ${following})`;
+    this.#log.info(LogTag.session, `sessions ${[...windows, ...hooks].join(', ')}${from}`);
   }
 
   // --- Device -> Accessibility ----------------------------------------------
@@ -744,6 +800,13 @@ export class SessionCoordinator {
    */
   #pressStop(sessionId) {
     const sessions = this.#view?.sessions ?? [];
+    // A terminal or editor session has no button to press. Falling back to the
+    // window being followed would stop an unrelated conversation instead.
+    if (sessionId != null && this.#hookSessions(this.#view ?? { sessions }).some((s) => s.id === sessionId)) {
+      this.#log.info(this.#log.sessionTag(sessionId),
+                     `no stop control for a session that has no window`, sessionId);
+      return;
+    }
     const following = this.#mirrored?.focusId ?? this.#view?.focusId;
     const target = sessions.find((session) => session.id === sessionId)
       ?? sessions.find((session) => session.id === following);
@@ -770,9 +833,12 @@ export class SessionCoordinator {
   /** Follows another session, and reports on it immediately. */
   #follow(sessionId) {
     if (!this.#tracker.focus(sessionId)) {
-      this.#log.warn(LogTag.session, `cannot follow ${sessionId}: no such session`);
+      if (!this.#followHookSession(sessionId)) {
+        this.#log.warn(LogTag.session, `cannot follow ${sessionId}: no such session`);
+      }
       return;
     }
+    this.#hookChoice = null;
     this.#log.info(this.#log.sessionTag(sessionId), 'now following this session', sessionId);
     if (this.#view === null) {
       this.refresh();
@@ -784,7 +850,26 @@ export class SessionCoordinator {
       ...this.#view,
       focusId: sessionId,
       focused: this.#view.sessions.find((session) => session.id === sessionId) ?? null,
+      selected: true,
     });
+  }
+
+  /**
+   * Follows a session only a hook has spoken for. The box lists these, so a key
+   * press on one has to do something.
+   *
+   * @returns {boolean} whether the id named a session the box is listing
+   */
+  #followHookSession(sessionId) {
+    const view = this.#view ?? { sessions: [] };
+    if (!this.#hookSessions(view).some((session) => session.id === sessionId)) return false;
+    this.#hookChoice = sessionId;
+    // A window picked earlier would otherwise keep the box for itself.
+    this.#tracker.release();
+    this.#log.info(this.#log.sessionTag(sessionId), 'now following this session', sessionId);
+    if (this.#view === null) this.refresh();
+    else this.#mirror({ ...this.#view, selected: false });
+    return true;
   }
 
   // --- Liveness --------------------------------------------------------------
