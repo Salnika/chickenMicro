@@ -26,7 +26,7 @@ clang++ -std=gnu++17 -Wall -Wextra -Wno-unused-parameter -O1 -DARDUINO=10819 \
   -I include -I tools/preview/shim -I "$GFX" -I "$QR" \
   -o tools/preview/out/preview \
   tools/preview/preview.cpp \
-  src/Display.cpp src/KeyLegend.cpp src/State.cpp src/TextLayout.cpp src/WifiQr.cpp \
+  src/ContentHash.cpp src/Display.cpp src/KeyLegend.cpp src/State.cpp src/TextLayout.cpp src/WifiQr.cpp \
   "$GFX/Adafruit_GFX.cpp" tools/preview/out/qrcodegen.o
 
 rtk proxy "tools/preview/out/preview" 2>&1 || tools/preview/out/preview

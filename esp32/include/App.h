@@ -9,6 +9,7 @@
 #include "OtpSetup.h"
 #include "OtpStore.h"
 #include "SerialProtocol.h"
+#include "Settings.h"
 #include "State.h"
 
 namespace app {
@@ -48,6 +49,9 @@ private:
     void closeMenu();
     void handleMenuControls(const input::ControlEvents& events);
     void activateMenuItem();
+    /// Tells the Mac how this box wants permissions answered. Sent on boot, each
+    /// time the Mac says hello, and when the menu changes it.
+    void announceMode();
 
     // --- One-time codes ---------------------------------------------------------
     void openOtpList();
@@ -94,6 +98,7 @@ private:
     ui::KeyLights keyLights_;
     otp::Store otpStore_;
     otp::Setup otpSetup_{otpStore_};
+    settings::Store settings_;
     input::Controls controls_;
     wire::SerialProtocol link_;
 

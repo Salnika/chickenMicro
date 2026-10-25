@@ -12,6 +12,7 @@
 
 #include "ButtonState.h"
 #include "ChickenWalk.h"
+#include "ContentHash.h"
 #include "ExpanderLogic.h"
 #include "JoystickLogic.h"
 #include "KeyLegend.h"
@@ -2012,6 +2013,142 @@ void test_menu_cursor_clamps_and_names_its_item() {
     TEST_ASSERT_EQUAL_UINT8(0, state.menuCursor());
 }
 
+/// The menu has more entries than the screen has rows, so it scrolls: just far
+/// enough to keep the highlighted entry in view, never so far that the list shows
+/// fewer rows than it could.
+void test_menu_scrolls_to_keep_the_cursor_in_view() {
+    app::State state;
+    TEST_ASSERT_EQUAL_UINT8(0, state.menuFirstRow());
+
+    // Inside the first window nothing scrolls.
+    for (int step = 0; step < app::kMenuVisibleRows - 1; ++step) state.moveMenuCursor(1);
+    TEST_ASSERT_EQUAL_UINT8(app::kMenuVisibleRows - 1, state.menuCursor());
+    TEST_ASSERT_EQUAL_UINT8(0, state.menuFirstRow());
+
+    // One past the bottom row: the window moves down by exactly one.
+    TEST_ASSERT_TRUE(state.moveMenuCursor(1));
+    TEST_ASSERT_EQUAL_UINT8(1, state.menuFirstRow());
+
+    // At the end of the list the window rests on the last full page.
+    for (int step = 0; step < 10; ++step) state.moveMenuCursor(1);
+    TEST_ASSERT_EQUAL_UINT8(app::kMenuItemCount - 1, state.menuCursor());
+    TEST_ASSERT_EQUAL_UINT8(app::kMenuItemCount - app::kMenuVisibleRows, state.menuFirstRow());
+
+    // Moving up inside the window does not drag it along.
+    TEST_ASSERT_TRUE(state.moveMenuCursor(-1));
+    TEST_ASSERT_EQUAL_UINT8(app::kMenuItemCount - app::kMenuVisibleRows, state.menuFirstRow());
+
+    // Back to the top, the window follows.
+    for (int step = 0; step < 10; ++step) state.moveMenuCursor(-1);
+    TEST_ASSERT_EQUAL_UINT8(0, state.menuCursor());
+    TEST_ASSERT_EQUAL_UINT8(0, state.menuFirstRow());
+}
+
+/// Whatever the cursor does, the highlighted entry is always one of the rows
+/// that gets drawn.
+void test_menu_cursor_is_always_a_drawn_row() {
+    app::State state;
+    const int moves[] = {1, 1, 1, 1, 1, 1, 1, -1, -1, 1, -1, -1, -1, -1, -1, -1, 1, 1, 1, 1, 1, 1};
+    for (int delta : moves) {
+        state.moveMenuCursor(delta);
+        TEST_ASSERT_TRUE(state.menuCursor() >= state.menuFirstRow());
+        TEST_ASSERT_TRUE(state.menuCursor() < state.menuFirstRow() + app::kMenuVisibleRows);
+        TEST_ASSERT_TRUE(state.menuFirstRow() + app::kMenuVisibleRows <= app::kMenuItemCount);
+    }
+    state.resetMenuCursor();
+    TEST_ASSERT_EQUAL_UINT8(0, state.menuFirstRow());
+}
+
+/// The mode entry sits among the settings, and Close is still the last entry.
+void test_menu_has_the_mode_entry_before_close() {
+    TEST_ASSERT_EQUAL_INT((int)app::MenuItem::Mode + 2, (int)app::MenuItem::Close);
+    TEST_ASSERT_EQUAL_UINT8((int)app::MenuItem::Close + 1, app::kMenuItemCount);
+}
+
+void test_permission_mode_defaults_to_auto_and_flips() {
+    app::State state;
+    TEST_ASSERT_EQUAL_INT((int)proto::PermissionMode::Auto, (int)state.permissionMode());
+
+    TEST_ASSERT_TRUE(state.setPermissionMode(proto::PermissionMode::Ui));
+    TEST_ASSERT_EQUAL_INT((int)proto::PermissionMode::Ui, (int)state.permissionMode());
+    // Setting what it already is changes nothing, so nothing is redrawn for it.
+    TEST_ASSERT_FALSE(state.setPermissionMode(proto::PermissionMode::Ui));
+
+    TEST_ASSERT_EQUAL_INT((int)proto::PermissionMode::Auto,
+                          (int)proto::nextPermissionMode(proto::PermissionMode::Ui));
+    TEST_ASSERT_EQUAL_INT((int)proto::PermissionMode::Ui,
+                          (int)proto::nextPermissionMode(proto::PermissionMode::Auto));
+}
+
+/// A byte read back from flash that is not a mode is the default, never a mode
+/// nobody chose.
+void test_permission_mode_from_flash_falls_back_to_auto() {
+    TEST_ASSERT_EQUAL_INT((int)proto::PermissionMode::Auto, (int)proto::permissionModeFromByte(0));
+    TEST_ASSERT_EQUAL_INT((int)proto::PermissionMode::Ui, (int)proto::permissionModeFromByte(1));
+    TEST_ASSERT_EQUAL_INT((int)proto::PermissionMode::Auto, (int)proto::permissionModeFromByte(2));
+    TEST_ASSERT_EQUAL_INT((int)proto::PermissionMode::Auto, (int)proto::permissionModeFromByte(255));
+    // What is stored reads back as itself.
+    TEST_ASSERT_EQUAL_INT((int)proto::PermissionMode::Ui,
+                          (int)proto::permissionModeFromByte(
+                              static_cast<uint8_t>(proto::PermissionMode::Ui)));
+}
+
+/// The frame the Mac decodes: the same two values its `mode` decoder accepts.
+void test_encodes_the_mode_frame() {
+    char frame[96];
+    size_t length = proto::encodeMode(frame, sizeof(frame), proto::PermissionMode::Auto);
+    TEST_ASSERT_GREATER_THAN(0, (int)length);
+    TEST_ASSERT_EQUAL_STRING("{\"v\":1,\"type\":\"mode\",\"value\":\"auto\"}\n", frame);
+
+    length = proto::encodeMode(frame, sizeof(frame), proto::PermissionMode::Ui);
+    TEST_ASSERT_EQUAL_STRING("{\"v\":1,\"type\":\"mode\",\"value\":\"ui\"}\n", frame);
+
+    // No room, no frame: a half-written line must never go out.
+    char tiny[10];
+    TEST_ASSERT_EQUAL_UINT32(0, (uint32_t)proto::encodeMode(tiny, sizeof(tiny),
+                                                            proto::PermissionMode::Auto));
+}
+
+/// The display redraws only when the content hash moves, so a field a screen
+/// draws but the hash ignores stays stale on the panel until something else
+/// changes. The menu's "Answer via" entry was exactly that: a click flipped the
+/// mode, and the label did not follow until the menu was closed and reopened.
+void test_content_hash_moves_with_what_the_menu_draws() {
+    app::State state;
+    state.setScreen(app::Screen::Menu);
+    const uint32_t base = ui::contentHashOf(state, ui::Waveform::Deep);
+
+    // The same state hashes the same, or nothing would ever settle.
+    TEST_ASSERT_TRUE(base == ui::contentHashOf(state, ui::Waveform::Deep));
+
+    // The answer mode is part of the label the menu draws.
+    state.setPermissionMode(proto::PermissionMode::Ui);
+    TEST_ASSERT_TRUE(base != ui::contentHashOf(state, ui::Waveform::Deep));
+    state.setPermissionMode(proto::PermissionMode::Auto);
+    TEST_ASSERT_TRUE(base == ui::contentHashOf(state, ui::Waveform::Deep));
+
+    // So is the waveform, which lives in the panel driver rather than the state.
+    TEST_ASSERT_TRUE(base != ui::contentHashOf(state, ui::Waveform::Gentle));
+}
+
+/// One highlighted row can sit in two different windows of the scrolled menu: the
+/// same cursor, a different screen. Moving between them must redraw.
+void test_content_hash_tells_two_scroll_windows_apart() {
+    app::State straight;           // down to the entry and no further
+    straight.setScreen(app::Screen::Menu);
+    for (int step = 0; step < 5; ++step) straight.moveMenuCursor(1);
+
+    app::State overshot;           // one past it, then back up
+    overshot.setScreen(app::Screen::Menu);
+    for (int step = 0; step < 6; ++step) overshot.moveMenuCursor(1);
+    overshot.moveMenuCursor(-1);
+
+    TEST_ASSERT_EQUAL_UINT8(straight.menuCursor(), overshot.menuCursor());
+    TEST_ASSERT_TRUE(straight.menuFirstRow() != overshot.menuFirstRow());
+    TEST_ASSERT_TRUE(ui::contentHashOf(straight, ui::Waveform::Deep) !=
+                     ui::contentHashOf(overshot, ui::Waveform::Deep));
+}
+
 /// The menu is modal: reconcile leaves it alone, but a permission still preempts
 /// it and a dropped link falls back to Connecting.
 void test_menu_screen_is_modal() {
@@ -2288,6 +2425,14 @@ int main(int, char**) {
     RUN_TEST(test_setup_screen_forgets_the_network_once_closed);
     RUN_TEST(test_waveform_cycles_and_wraps);
     RUN_TEST(test_menu_cursor_clamps_and_names_its_item);
+    RUN_TEST(test_menu_scrolls_to_keep_the_cursor_in_view);
+    RUN_TEST(test_menu_cursor_is_always_a_drawn_row);
+    RUN_TEST(test_menu_has_the_mode_entry_before_close);
+    RUN_TEST(test_permission_mode_defaults_to_auto_and_flips);
+    RUN_TEST(test_permission_mode_from_flash_falls_back_to_auto);
+    RUN_TEST(test_encodes_the_mode_frame);
+    RUN_TEST(test_content_hash_moves_with_what_the_menu_draws);
+    RUN_TEST(test_content_hash_tells_two_scroll_windows_apart);
     RUN_TEST(test_menu_screen_is_modal);
     RUN_TEST(test_page_span_with_a_shorter_first_page);
 

@@ -362,6 +362,23 @@ int main() {
         capture("menu", display, driver, state);
     }
 
+    // 10b. The same menu scrolled to its end, with the answer mode flipped: the
+    // list is longer than the screen, so the carets say which way it goes on.
+    {
+        app::State state;
+        state.setLinkUp(true);
+        auto sessions = sessionsFrame({{"chickenMicro", proto::ClaudeState::Idle}}, "s1");
+        state.setSessions(sessions);
+        state.setScreen(app::Screen::Menu);
+        state.setPermissionMode(proto::PermissionMode::Ui);
+        // Down to the mode entry first, so both carets show.
+        for (int step = 0; step < static_cast<int>(app::MenuItem::Mode); ++step) {
+            state.moveMenuCursor(1);
+        }
+        state.moveMenuCursor(2);
+        capture("menu - scrolled, window only", display, driver, state);
+    }
+
     // 11. One-time codes: the list, the code just copied, and adding one.
     {
         app::State state;

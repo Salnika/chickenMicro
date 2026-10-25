@@ -105,6 +105,11 @@ bool SerialProtocol::sendHello(const char* app, const char* version) {
     return write(frame, proto::encodeHello(frame, sizeof(frame), app, version));
 }
 
+bool SerialProtocol::sendMode(proto::PermissionMode mode) {
+    char frame[kOutboundCapacity];
+    return write(frame, proto::encodeMode(frame, sizeof(frame), mode));
+}
+
 bool SerialProtocol::sendOtp(const char* label, const char* code, uint32_t expiresInMs) {
     char frame[kOutboundCapacity];
     return write(frame, proto::encodeOtp(frame, sizeof(frame), label, code, expiresInMs));

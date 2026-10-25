@@ -8,6 +8,7 @@
 
 #include "ChickenWalk.h"
 #include "Config.h"
+#include "ContentHash.h"
 #include "Log.h"
 #include "TextLayout.h"
 
@@ -210,10 +211,18 @@ const char* menuLabel(app::MenuItem item) {
         case app::MenuItem::CleanScreen: return "Clean the screen (45 s)";
         // Rendered with the current waveform's name appended; see drawMenu.
         case app::MenuItem::Waveform: return "Waveform: ";
+        // Likewise with the current mode appended.
+        case app::MenuItem::Mode: return "Answer via: ";
         case app::MenuItem::Resync: return "Resync with the Mac";
         case app::MenuItem::Close: return "Close menu";
     }
     return "?";
+}
+
+/// What a mode is called on the panel: where the answer comes from, not what the
+/// protocol calls it. A hook is how the box answers; the window is the fallback.
+const char* permissionModeLabel(proto::PermissionMode mode) {
+    return mode == proto::PermissionMode::Ui ? "window only" : "hook, then window";
 }
 
 // --- The chicken ------------------------------------------------------------
@@ -292,20 +301,6 @@ void drawKeyCap(Adafruit_GFX& gfx, Key key, int16_t x, int16_t y, uint16_t ink) 
         case Key::Check: drawCheckGlyph(gfx, x, y, ink); break;
         case Key::Return: drawReturnGlyph(gfx, x, y, ink); break;
     }
-}
-
-uint32_t hashString(uint32_t seed, const char* text) {
-    uint32_t hash = seed;
-    if (text == nullptr) return hash;
-    for (const char* cursor = text; *cursor != '\0'; ++cursor) {
-        hash ^= static_cast<uint8_t>(*cursor);
-        hash *= 16777619u;
-    }
-    return hash;
-}
-
-uint32_t hashByte(uint32_t seed, uint8_t value) {
-    return (seed ^ value) * 16777619u;
 }
 
 /// Folds the chicken's step into a content hash: a step changes the glass, but
@@ -687,8 +682,14 @@ void Display::drawMenu(Adafruit_GFX& gfx, const app::State& state) const {
     gfx.setFont(nullptr);
     gfx.setTextColor(driver_.ink());
 
+    // The list is longer than the screen: draw the window the state has scrolled
+    // to, and mark the edge that has more beyond it.
+    const uint8_t first = state.menuFirstRow();
+    const uint8_t end = static_cast<uint8_t>(
+        first + app::kMenuVisibleRows < state.menuItemCount() ? first + app::kMenuVisibleRows
+                                                              : state.menuItemCount());
     int16_t y = kBodyTop;
-    for (uint8_t index = 0; index < state.menuItemCount(); ++index) {
+    for (uint8_t index = first; index < end; ++index) {
         const bool selected = index == state.menuCursor();
         if (selected) {
             // An outline, not a fill: a filled bar makes the 3-colour glass go
@@ -704,6 +705,16 @@ void Display::drawMenu(Adafruit_GFX& gfx, const app::State& state) const {
         // see where you are while comparing them on the glass.
         if (static_cast<app::MenuItem>(index) == app::MenuItem::Waveform) {
             gfx.print(waveformName(driver_.waveform()));
+        }
+        if (static_cast<app::MenuItem>(index) == app::MenuItem::Mode) {
+            gfx.print(permissionModeLabel(state.permissionMode()));
+        }
+        // A caret at the right edge says the list goes on past this row.
+        const bool moreAbove = index == first && first > 0;
+        const bool moreBelow = index == end - 1 && end < state.menuItemCount();
+        if (moreAbove || moreBelow) {
+            gfx.setCursor(static_cast<int16_t>(width - kMargin - 6), y);
+            gfx.print(moreAbove ? '^' : 'v');
         }
         // The session list's row pitch: six entries fit above the key bar.
         y = static_cast<int16_t>(y + kRowHeight);
@@ -991,48 +1002,9 @@ void Display::drawPermission(Adafruit_GFX& gfx, const app::State& state) const {
 // ---------------------------------------------------------------------------
 
 uint32_t Display::contentHash(const app::State& state) const {
-    uint32_t hash = 2166136261u;
-    hash = hashByte(hash, static_cast<uint8_t>(state.screen()));
-    hash = hashByte(hash, static_cast<uint8_t>(state.claudeState()));
-    hash = hashByte(hash, static_cast<uint8_t>(state.page()));
-    hash = hashByte(hash, state.linkUp() ? 1u : 0u);
-    hash = hashByte(hash, state.loaderFrame());
-    hash = hashByte(hash, state.cursor());
-    hash = hashByte(hash, state.menuCursor());
-    // Part of what the menu shows, so switching waveform redraws its label.
-    hash = hashByte(hash, static_cast<uint8_t>(driver_.waveform()));
-    hash = hashByte(hash, state.sessionTotal());
-    hash = hashString(hash, state.focusId());
-    hash = hashString(hash, state.detail());
-    hash = hashString(hash, state.message());
-    for (uint8_t index = 0; index < state.sessionCount(); ++index) {
-        const proto::SessionEntry& session = state.sessionAt(index);
-        hash = hashString(hash, session.id);
-        hash = hashString(hash, session.name);
-        hash = hashByte(hash, static_cast<uint8_t>(session.state));
-    }
-    // One-time codes: every field their three screens draw.
-    hash = hashByte(hash, state.hasClock() ? 1u : 0u);
-    hash = hashByte(hash, state.otpCount());
-    hash = hashByte(hash, state.otpCursor());
-    for (uint8_t index = 0; index < state.otpCount(); ++index) {
-        hash = hashString(hash, state.otpName(index));
-    }
-    hash = hashString(hash, state.otpCodeName());
-    hash = hashString(hash, state.otpCode());
-    hash = hashByte(hash, state.otpExpired() ? 1u : 0u);
-    hash = hashByte(hash, static_cast<uint8_t>(state.otpSecondsLeft()));
-    hash = hashString(hash, state.setupNetwork());
-    hash = hashString(hash, state.setupPassword());
-    hash = hashString(hash, state.setupNote());
-    if (state.permission().valid) {
-        hash = hashString(hash, state.permission().id);
-        hash = hashString(hash, state.permission().kind);
-        hash = hashString(hash, state.permission().content);
-        hash = hashString(hash, state.permission().title);
-        hash = hashString(hash, state.permission().session);
-    }
-    return hash;
+    // Kept in ContentHash.cpp, with no panel in it, so the host tests can check
+    // that whatever a screen draws also moves the hash.
+    return contentHashOf(state, driver_.waveform());
 }
 
 }  // namespace ui

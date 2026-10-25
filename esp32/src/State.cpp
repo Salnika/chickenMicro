@@ -345,6 +345,20 @@ bool State::moveMenuCursor(int delta) {
     if (target > kMenuItemCount - 1) target = kMenuItemCount - 1;
     if (static_cast<uint8_t>(target) == menuCursor_) return false;
     menuCursor_ = static_cast<uint8_t>(target);
+
+    // Scroll only as far as needed: the highlighted row stays on screen, and the
+    // list does not jump when the cursor moves inside the window.
+    if (menuCursor_ < menuFirstRow_) {
+        menuFirstRow_ = menuCursor_;
+    } else if (menuCursor_ >= menuFirstRow_ + kMenuVisibleRows) {
+        menuFirstRow_ = static_cast<uint8_t>(menuCursor_ - kMenuVisibleRows + 1);
+    }
+    return true;
+}
+
+bool State::setPermissionMode(proto::PermissionMode mode) {
+    if (mode == permissionMode_) return false;
+    permissionMode_ = mode;
     return true;
 }
 

@@ -442,6 +442,14 @@ size_t encodeHello(char* out, size_t capacity, const char* app, const char* vers
     return finish(out, capacity, offset);
 }
 
+size_t encodeMode(char* out, size_t capacity, PermissionMode mode) {
+    size_t offset = 0;
+    if (!writeLiteral(out, capacity, offset, "{\"v\":1,\"type\":\"mode\",\"value\":")) return 0;
+    if (!writeQuoted(out, capacity, offset, permissionModeName(mode))) return 0;
+    if (!writeLiteral(out, capacity, offset, "}")) return 0;
+    return finish(out, capacity, offset);
+}
+
 size_t encodeLog(char* out, size_t capacity, LogLevel level, const char* message) {
     size_t offset = 0;
     if (!writeLiteral(out, capacity, offset, "{\"v\":1,\"type\":\"log\",\"level\":")) return 0;

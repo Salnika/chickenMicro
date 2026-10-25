@@ -52,12 +52,19 @@ enum class MenuItem : uint8_t {
     AddOtp,        ///< open the Wi-Fi setup page for adding an account
     CleanScreen,   ///< the black/red/white pigment cycle that scrubs the glass
     Waveform,      ///< step through the mono refresh waveforms, to compare by eye
+    Mode,          ///< how permissions are answered: through a hook, or the window only
     Resync,        ///< ask the Mac to resend the whole snapshot
     Close,         ///< leave the menu
 };
 
 /// Number of entries in `MenuItem`.
-constexpr uint8_t kMenuItemCount = 6;
+constexpr uint8_t kMenuItemCount = 7;
+
+/// Entries the menu draws at once: six rows fit above the key bar. With more
+/// entries than that the list scrolls, just far enough to keep the highlighted
+/// one in view.
+constexpr uint8_t kMenuVisibleRows = 6;
+static_assert(kMenuItemCount >= kMenuVisibleRows, "the scroll window assumes a list at least as long as the screen");
 
 /// One-time-code accounts the box can hold, and the room for each name.
 constexpr uint8_t kMaxOtpAccounts = 16;
@@ -227,11 +234,25 @@ public:
     // --- Menu -----------------------------------------------------------------
 
     uint8_t menuCursor() const { return menuCursor_; }
+    /// The first entry drawn. Always within `kMenuItemCount - kMenuVisibleRows`.
+    uint8_t menuFirstRow() const { return menuFirstRow_; }
     static constexpr uint8_t menuItemCount() { return kMenuItemCount; }
     MenuItem menuItem() const { return static_cast<MenuItem>(menuCursor_); }
-    void resetMenuCursor() { menuCursor_ = 0; }
-    /// Moves the highlighted entry, clamped to the list (no wrap).
+    void resetMenuCursor() {
+        menuCursor_ = 0;
+        menuFirstRow_ = 0;
+    }
+    /// Moves the highlighted entry, clamped to the list (no wrap), and scrolls the
+    /// window to keep it in view.
     bool moveMenuCursor(int delta);
+
+    // --- Permission mode ------------------------------------------------------
+
+    /// How the box wants permissions answered. Loaded from flash at boot and sent
+    /// to the Mac in a `mode` frame; see protocol/PROTOCOL.md §2.
+    proto::PermissionMode permissionMode() const { return permissionMode_; }
+    /// Returns whether the mode changed.
+    bool setPermissionMode(proto::PermissionMode mode);
 
     uint16_t page() const { return page_; }
     bool setPage(uint16_t page);
@@ -261,6 +282,8 @@ private:
 
     Screen screen_ = Screen::Connecting;
     uint8_t menuCursor_ = 0;
+    uint8_t menuFirstRow_ = 0;
+    proto::PermissionMode permissionMode_ = proto::PermissionMode::Auto;
 
     bool hasClock_ = false;
     /// The last `time` frame: Unix milliseconds, and millis() when it arrived.

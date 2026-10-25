@@ -53,10 +53,13 @@ void App::setup() {
     controls_.begin();   // logs which input carries which key
     otpStore_.begin();
     refreshOtpAccounts();
+    settings_.begin();
+    state_.setPermissionMode(settings_.permissionMode());
     // Only once the inputs are configured: the callback reads them.
     display_.onBusy(&App::sampleWhileBusy, this);
     link_.begin(*this);
     link_.sendHello(kAppName, kAppVersion);
+    announceMode();
 
     logMessage(proto::LogLevel::Info, "[state] waiting for the Mac");
     waitingSinceMs_ = millis();
@@ -257,6 +260,10 @@ void App::handleMenuControls(const input::ControlEvents& events) {
     }
 }
 
+void App::announceMode() {
+    link_.sendMode(state_.permissionMode());
+}
+
 void App::activateMenuItem() {
     switch (state_.menuItem()) {
         case MenuItem::CleanScreen: {
@@ -302,6 +309,22 @@ void App::activateMenuItem() {
             } else {
                 logMessage(proto::LogLevel::Info, "[menu] this panel has a fixed waveform");
             }
+            markDirty();
+            break;
+        }
+
+        case MenuItem::Mode: {
+            // Flips between the two and stays in the menu, like the waveform. The
+            // choice is kept in flash, and the Mac is told at once: it answers
+            // permissions the new way from the next request.
+            const proto::PermissionMode next = proto::nextPermissionMode(state_.permissionMode());
+            state_.setPermissionMode(next);
+            if (!settings_.savePermissionMode(next)) {
+                logMessage(proto::LogLevel::Warn,
+                           "[menu] could not save the answer mode: it is back to the default at reboot");
+            }
+            logf(proto::LogLevel::Info, "[menu] answer mode -> %s", proto::permissionModeName(next));
+            announceMode();
             markDirty();
             break;
         }
@@ -734,8 +757,10 @@ void App::onHello(const proto::InboundFrame& frame) {
     } else {
         logMessage(proto::LogLevel::Info, "[serial] host hello");
     }
-    // Announce ourselves so the Mac resends its full snapshot.
+    // Announce ourselves so the Mac resends its full snapshot. A Mac that has
+    // just started knows nothing of the mode this box chose, so it is told again.
     link_.sendHello(kAppName, kAppVersion);
+    announceMode();
     markDirty();
 }
 

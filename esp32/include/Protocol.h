@@ -67,6 +67,18 @@ constexpr const char* permissionModeName(PermissionMode mode) {
     return mode == PermissionMode::Ui ? "ui" : "auto";
 }
 
+/// The other mode: the menu entry flips between the two.
+constexpr PermissionMode nextPermissionMode(PermissionMode mode) {
+    return mode == PermissionMode::Auto ? PermissionMode::Ui : PermissionMode::Auto;
+}
+
+/// A mode as stored in flash. Anything that is not a known value reads as `Auto`,
+/// the default: a corrupt byte must never leave the box in a mode nobody chose.
+constexpr PermissionMode permissionModeFromByte(uint8_t raw) {
+    return raw == static_cast<uint8_t>(PermissionMode::Ui) ? PermissionMode::Ui
+                                                          : PermissionMode::Auto;
+}
+
 enum class Navigation : uint8_t {
     Up,
     Down,
@@ -216,6 +228,10 @@ size_t encodeFocus(char* out, size_t capacity, const char* sessionId);
 size_t encodeNavigation(char* out, size_t capacity, Navigation navigation);
 
 size_t encodeHello(char* out, size_t capacity, const char* app, const char* version);
+
+/// Writes `{"v":1,"type":"mode","value":"auto"}\n`: how the box wants permissions
+/// answered. See protocol/PROTOCOL.md §2.
+size_t encodeMode(char* out, size_t capacity, PermissionMode mode);
 
 size_t encodeLog(char* out, size_t capacity, LogLevel level, const char* message);
 

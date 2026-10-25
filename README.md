@@ -191,7 +191,9 @@ Connecting and Permission own the display — they cannot be navigated away from
 
 **Hold the joystick click (~0.6 s)** to open a menu, from Home, Sessions or
 Message; hold again — or the ✕ key — to close it. Move with the joystick, and
-confirm with a click, ✓, or ↵. It is where device-side commands live:
+confirm with a click, ✓, or ↵. The list is longer than the screen, so it scrolls: a
+caret at the edge of the last row drawn says which way it goes on. It is where
+device-side commands live:
 
 | Entry | Does |
 | ----- | ---- |
@@ -199,6 +201,7 @@ confirm with a click, ✓, or ↵. It is where device-side commands live:
 | **Add OTP** | opens a temporary Wi-Fi page for adding an account; a QR code on the panel joins it |
 | **Clean the screen** | the full black → red → white pigment cycle (~45 s) |
 | **Waveform: …** | steps through the mono refresh waveforms (`gentle`, `stock`, `deep`) to compare black depth, ghosting and red creep by eye; `deep`, the default, has the strongest black and `stock` refreshes twice as fast; `kDefaultWaveform` in `Config.h` sets the one loaded at boot |
+| **Answer via: …** | flips how the box answers permissions between **hook, then window** (the default) and **window only**. Kept across reboots, and sent to the Mac in a `mode` frame — see [the hook](#answering-through-a-claude-code-hook) |
 | **Resync with the Mac** | asks the daemon to resend the whole state |
 | **Close menu** | back to where you were |
 
@@ -210,8 +213,14 @@ white, for about 45 seconds — that is it working, not a fault. It is the same
 cycle as the standalone `esp32dev_clear_panel` tool, so that no longer needs
 flashing just to clean the glass.
 
+**Answer via** is the box's one saved setting: the choice is stored in flash (NVS
+namespace `chickenmicro`) and read back at boot, and a value that is not a known
+mode reads as the default. The daemon is told on boot, whenever it says hello, and
+the moment the entry changes.
+
 Adding an entry is three edits: a value in `MenuItem` (`esp32/include/State.h`),
-its label (`Display.cpp`), and its action (`App::activateMenuItem`).
+its label (`Display.cpp`), and its action (`App::activateMenuItem`). The menu
+scrolls on its own: `kMenuVisibleRows` is how many rows the screen holds.
 
 ### One-time codes
 
@@ -618,8 +627,10 @@ The [`plugin/`](plugin/README.md) installs that hook. The daemon listens for it 
 a local socket, shows the request on the box, and writes ✓ or ✕ back to the hook.
 Without the plugin, without the daemon, or when it times out, the daemon presses
 the buttons as before — nothing is lost, and nothing is answered that the box did
-not answer. The box announces which way it wants permissions answered in a `mode`
-frame ([PROTOCOL.md §10](protocol/PROTOCOL.md#10-the-hook-channel-mac-local)).
+not answer. The menu's **Answer via** entry picks which way the box wants them
+answered — through the hook with the window as the fallback, or the window only —
+and announces it in a `mode` frame
+([PROTOCOL.md §10](protocol/PROTOCOL.md#10-the-hook-channel-mac-local)).
 
 ---
 

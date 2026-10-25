@@ -42,6 +42,8 @@ public:
     /// was following.
     bool sendFocus(const char* sessionId);
     bool sendHello(const char* app, const char* version);
+    /// Tells the Mac how the box wants permissions answered.
+    bool sendMode(proto::PermissionMode mode);
     bool sendPing(int seq);
     bool sendPong(int seq);
     /// Hands a one-time code to the Mac, which puts it on the clipboard.
