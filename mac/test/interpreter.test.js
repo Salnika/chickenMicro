@@ -234,6 +234,46 @@ describe('the real Claude Desktop permission dialog', () => {
     assert.equal(bindings.get('approve'), undefined);
   });
 
+  it('detects the dialog whose only allow button is the session-wide grant', () => {
+    // Captured from a later Claude Desktop release: "Refuser" beside a single
+    // "Toujours autoriser" whose title carries its own description, and an
+    // options menu. No "Autoriser une fois" button exists in the tree.
+    const tree = new AXNode({
+      role: 'AXApplication',
+      children: [new AXNode({
+        role: 'AXWindow',
+        children: [new AXNode({
+          role: 'AXGroup',
+          children: [
+            new AXNode({ role: 'AXStaticText', value: 'Modifier test-permission.txt' }),
+            new AXNode({
+              role: 'AXButton', title: 'Refuser',
+              actions: [AX_PRESS], ref: new AXRef('refuser'),
+            }),
+            new AXNode({
+              role: 'AXButton',
+              title: 'Toujours autoriser , S’applique uniquement à cette session.',
+              actions: [AX_PRESS], ref: new AXRef('toujours'),
+              children: [
+                new AXNode({ role: 'AXStaticText', value: 'Toujours autoriser' }),
+                new AXNode({ role: 'AXStaticText', value: 'S’applique uniquement à cette session.' }),
+              ],
+            }),
+            new AXNode({
+              role: 'AXPopUpButton', description: 'Plus d’options d’autorisation',
+              actions: [AX_PRESS], ref: new AXRef('options'),
+            }),
+          ],
+        })],
+      })],
+    });
+    const { snapshot, bindings } = interpret(tree);
+    assert.equal(snapshot.state, 'waiting_permission');
+    assert.deepEqual(snapshot.permission.actions, ['deny']);
+    assert.equal(bindings.get('deny').marker, 'refuser');
+    assert.equal(bindings.get('approve'), undefined, 'the session-wide grant must never be bound');
+  });
+
   it('refuses a standing grant even if it is listed as an approve label', () => {
     // The guard is defence in depth: today "Toujours autoriser" is simply
     // absent from approveLabels, so nothing binds it. This proves the

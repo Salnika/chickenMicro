@@ -45,6 +45,11 @@ export const selectors = {
     'allow always', 'always allow', 'toujours autoriser',
     'allow for this chat', 'autoriser pour ce chat',
     'always allow this', 'toujours autoriser ceci',
+    // The title a later release gives that button, description included:
+    // "Toujours autoriser , S’applique uniquement à cette session." Matching is
+    // exact, so the whole string is needed — without it the dialog has no
+    // allow-ish button at all and goes undetected.
+    "toujours autoriser s'applique uniquement a cette session",
   ],
 
   /** Button labels that refuse the pending request. */
