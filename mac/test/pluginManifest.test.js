@@ -15,8 +15,9 @@ describe('the plugin Claude Code installs', () => {
   const commands = (event) => hooks[event].flatMap((group) => group.hooks);
 
   it('listens for the permissions and for the life of a session, and nothing else', () => {
-    assert.deepEqual(Object.keys(hooks).sort(),
-                     ['PermissionRequest', 'SessionEnd', 'SessionStart', 'Stop', 'UserPromptSubmit']);
+    assert.deepEqual(Object.keys(hooks).sort(), [
+      'PermissionRequest', 'SessionEnd', 'SessionStart', 'Stop', 'StopFailure', 'UserPromptSubmit',
+    ]);
   });
 
   it('starts every hook through the launcher, which finds node', () => {
@@ -30,7 +31,7 @@ describe('the plugin Claude Code installs', () => {
 
   it('lets a permission wait for a key, and never holds a turn up for the rest', () => {
     for (const hook of commands('PermissionRequest')) assert.ok(hook.timeout >= 120);
-    for (const event of ['SessionStart', 'UserPromptSubmit', 'Stop', 'SessionEnd']) {
+    for (const event of ['SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure', 'SessionEnd']) {
       for (const hook of commands(event)) {
         assert.ok(hook.timeout > 0 && hook.timeout <= 10, `${event} may wait ${hook.timeout}s`);
       }

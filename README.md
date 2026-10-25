@@ -611,7 +611,7 @@ bound — before any hardware is involved.
 | `--no-log-file` | `run`: keep no log file |
 | `--stdout` | `simulate`: print frames instead of using serial |
 | `--no-prompt` | do not trigger the macOS Accessibility prompt |
-| `--hook-socket <path>` | `run`: where Claude Code hooks connect (default `~/.claude-remote/hook.sock`) |
+| `--hook-socket <path>` | `run`: where the daemon listens for hooks (default `~/.claude-remote/hook.sock`). The hooks find it through `CLAUDE_REMOTE_SOCKET` in the environment Claude Code runs in, which must name the same path |
 | `--no-hook` | `run`: do not listen for hooks; answer by pressing Claude's buttons only |
 | `--no-accessibility` | `run`: never read Claude Desktop's windows or load the native module; answer Claude Code hooks only |
 | `--accessibility` | `run`: refuse to start without the Accessibility grant, as it used to (the default is to carry on hook-only) |
@@ -643,7 +643,10 @@ it logs why and answers hooks only. With the grant, and Claude Desktop open, it 
 both: the windows are read as before, and terminal and editor sessions are listed
 beside them.
 
-1. Run the daemon: `node bin/claude-remote.js run` from `mac/`.
+1. Run the daemon: `node bin/claude-remote.js run` from `mac/`. Restart it whenever
+   this folder is updated: a daemon that predates a hook refuses its messages
+   (`[HOOK] rejected a hook request` in its log) and the box simply never hears of
+   the session.
 2. Install the hooks for every session, whichever app starts it: the
    [plugin](plugin/README.md), or `node bin/claude-remote.js hook-config` and merge
    what it prints into `~/.claude/settings.json`. The launcher finds `node` through
@@ -654,14 +657,28 @@ beside them.
    has asked for anything. Ask Claude for something that needs a permission: it
    reaches the box as soon as the hook sends it, and ✓ or ✕ answers it.
 
+The daemon learns of a session only from what its hooks say, and nothing replays
+the past: a session that was already open when the daemon started, or when you ran
+`/reload-plugins`, appears at its next prompt, the end of its turn or its next
+permission request — not before. (`claude-remote sessions` lists Claude Desktop's
+windows only; the `[SESSION] sessions …` line in the daemon's log lists the others,
+as `c1:name state`.)
+
 What the box shows for these sessions: *thinking* from a prompt to the end of the
 turn, *done* for a moment, then *idle*, and *waiting* while a request is pending.
-A session that ends leaves the list at once; one that cannot say so (a killed
-terminal) leaves after two hours. Two with the same folder name get the first
-characters of their id. The box lists eight sessions at most, windows included; if
-more are running the quietest hook sessions go first, never one that is waiting.
-The session asking is the one the box describes; when none is, the one you picked
-with the keys. **STOP** has nothing to press in a terminal or an editor.
+A turn that ends on an API error counts as over. A turn you interrupt with Esc sends
+nothing at all, so a session stays *thinking* until fifteen minutes after its prompt
+or after the last permission it asked for, and the chicken walks all that time. A
+session that ends leaves the list at once; one that cannot say so (a killed
+terminal) leaves after two hours. A session is named by its folder — the one it was
+started in, not where Claude has since gone — or by the name you gave it with
+`--name` or `/rename`; two that read alike get the first characters of their id.
+The box lists eight sessions at most, windows included; if more are running the
+quietest hook sessions go first, never one that is waiting, and the windows keep
+their rows. The session asking is the one the box describes, unless you picked a
+window with the keys, which keeps the box; when none is asking, it is the one you
+picked, until you bring another window to the front on the Mac. **STOP** has
+nothing to press in a terminal or an editor.
 
 A conversation in Claude Desktop's Code tab is already one of the windows, so it is
 not listed a second time: the hook says which front-end started the session

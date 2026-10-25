@@ -19,12 +19,17 @@ export const HOOK_TOOL_MAX_CHARS = 128;
 export const HOOK_SESSION_MAX_CHARS = 128;
 export const HOOK_CWD_MAX_CHARS = 1024;
 export const HOOK_ENTRYPOINT_MAX_CHARS = 64;
+/** A title longer than this is cut, not refused: a long name must not lose the event. */
+export const HOOK_TITLE_MAX_CHARS = 128;
+export const HOOK_SOURCE_MAX_CHARS = 16;
 
 /** What happens in a session that a hook reports. */
 export const HookEvent = Object.freeze({
   sessionStart: 'SessionStart',
   prompt: 'UserPromptSubmit',
   stop: 'Stop',
+  /** A turn that ended on an API error: Claude Code runs this *instead of* Stop. */
+  stopFailure: 'StopFailure',
   sessionEnd: 'SessionEnd',
 });
 const HOOK_EVENTS = new Set(Object.values(HookEvent));
@@ -97,7 +102,13 @@ function readEvent(object) {
   if (origin.session === '' && origin.cwd === '') {
     return { rejected: HookRejection.missingField('session') };
   }
-  return { event: { name: object.event, ...origin } };
+  // The name a user gave the session, when they gave it one. `source` says why a
+  // session started (a compaction is not a new start).
+  const title = isString(object.title) ? object.title.slice(0, HOOK_TITLE_MAX_CHARS) : '';
+  const source = isString(object.source) && object.source.length <= HOOK_SOURCE_MAX_CHARS
+    ? object.source
+    : '';
+  return { event: { name: object.event, ...origin, title, source } };
 }
 
 /**

@@ -707,45 +707,68 @@ go down this list.
 2. **Did it start hook-only?** With no Accessibility grant it logs
    `answering Claude Code hooks only: … because …`. That is normal for these
    sessions; it only means Claude Desktop's windows are not read.
-3. **Is the plugin the current one, in a session started after it?** Hooks come from
-   the plugin copy Claude Code keeps in `~/.claude/plugins/cache/`, not from this
-   folder, so a change here reaches Claude Code only as a new plugin version
-   (`claude plugin list` shows the installed one; it has to be 0.2.0 or later to
-   report sessions, not only permissions). The update is `claude plugin marketplace
-   update chickenmicro` then `claude plugin update chickenmicro-permissions@chickenmicro`,
-   and a session that was already running only takes it after `/reload-plugins`,
-   or once restarted.
-4. **Is the hook installed for every project?** Put it in `~/.claude/settings.json`
+3. **Are the hooks loaded, in a session started after them?** In a new session, run
+   `/hooks`: the six events (`PermissionRequest`, `SessionStart`, `UserPromptSubmit`,
+   `Stop`, `StopFailure`, `SessionEnd`) must show the plugin as their source, and the
+   `/plugin` Errors tab must be empty. A plugin added from a folder of this repository
+   is loaded from that folder in place: the files checked out *are* the installed
+   plugin, and changing branch, stashing or moving the folder changes or removes the
+   hooks of every new session (a branch from before the session events has the
+   permission hook only). `claude plugin list --json` can show an old `version` for
+   the install record; `folderVersion` is what is read. A session that was already
+   running only takes a change after `/reload-plugins`, or once restarted. Only a
+   plugin installed from a git URL is a cached copy, replaced by `claude plugin
+   marketplace update chickenmicro` and `claude plugin update
+   chickenmicro-permissions@chickenmicro` after raising its `version`.
+4. **Does the daemon run the current code?** It must be restarted whenever the repo
+   is updated. A daemon from before the session events turns each of them away, and
+   says so at warn level: `[HOOK] rejected a hook request (unknown hook frame
+   "event")`. Permissions still work then, so nothing else looks wrong.
+5. **Is the hook installed for every project?** Put it in `~/.claude/settings.json`
    or install the plugin at user level (`claude-remote hook-config` prints the
    block). A hook in one project's `.claude/settings.local.json` reaches that
    project only.
-5. **Does a request reach the daemon?** Ask Claude for something that needs a
+6. **Does a request reach the daemon?** Ask Claude for something that needs a
    permission and look for `[HOOK] request hN: …`. Two other lines mean the hook ran
    and was turned away: `request stood down: the box answers through the interface`
    — set the box's **Answer via** back to *hook, then window*, because a session
    with no window has no other way in — and `request stood down: too many requests
    are waiting`, which clears as the waiting ones are answered or time out. If none
    of the three appears, the hook did not run or did not find `node`.
-6. **VS Code and `node`.** An editor opened from the Dock often has no `node` on its
+7. **VS Code and `node`.** An editor opened from the Dock often has no `node` on its
    `PATH`. The launcher takes the one the daemon left in `~/.claude-remote/node`, so
    start the daemon at least once after updating; if that file is missing the hook
    stands down without a word. The daemon leaves it only in a folder no one else
    can write to — with `--hook-socket` pointing into a shared folder such as `/tmp`
-   it says so in the log and the launcher uses the `PATH` instead.
-7. **A session is not on the box.** Start it, send a prompt, and run the daemon with
-   `--log debug`: each event shows as `[HOOK] SessionStart in …` or
-   `UserPromptSubmit in …`. None means the hooks did not run (items 3 to 6). With
-   Claude Desktop's windows read, only a session that says it runs in a terminal or
-   an editor is listed — a Code-tab conversation in Desktop is already one of the
-   windows. A session that ended, or was quiet for two hours, is dropped; its next
-   prompt brings it back. The box shows eight sessions at most, windows included.
-8. **It says *idle* while Claude works, or *thinking* when it has stopped.** The box
-   only knows what hooks tell it: a prompt starts a turn and `Stop` ends it. A turn
-   interrupted with Esc may not send `Stop`, and the box then reads *idle* again
-   fifteen minutes later.
-9. **STOP does nothing.** There is no button to press for a session without a
-   window, so the key has nothing to act on there, and it does not stop the window
-   being followed either.
+   it says so in the log and the launcher uses the `PATH` instead. A daemon given
+   `--hook-socket` listens there, but the hooks look where `CLAUDE_REMOTE_SOCKET`
+   says (default `~/.claude-remote/hook.sock`): set that variable to the same path in
+   the environment Claude Code runs in, or they find nothing and stand down silently.
+8. **A session is not on the box.** Start a new session and send a prompt, and run the
+   daemon with `--log debug`: each event shows as `[HOOK] SessionStart in … (front-end
+   cli)`. None, and no `rejected a hook request` warning either, means the hooks did
+   not run (items 3, 5 and 7); the warning means an old daemon (item 4). A session
+   that was *already open* when the daemon started, or when you ran `/reload-plugins`,
+   is not found before its next prompt, end of turn or permission request: nothing
+   replays the past, and `claude-remote sessions` lists Claude Desktop's windows only.
+   With Claude Desktop's windows read, only a session that says it runs in a terminal
+   or an editor is listed — a Code-tab conversation in Desktop is already one of the
+   windows; the front-end shows in that debug line. A session that ended, or was quiet
+   for two hours, is dropped; its next prompt brings it back. The box shows eight
+   sessions at most, and the windows keep their rows.
+9. **It says *idle* while Claude works, or *thinking* when it has stopped.** The box
+   only knows what hooks tell it: a prompt starts a turn, and `Stop` — or `StopFailure`,
+   after an API error — ends it. Esc sends neither, so the box keeps reading
+   *thinking*, with the chicken walking, until fifteen minutes after the prompt or
+   after the last permission the session asked for. Conversely a long turn that asks
+   for nothing, in a mode that never asks, reads *idle* from fifteen minutes in.
+10. **The name is a folder, not what I called the session.** The name comes from
+    `--name` or `/rename`, and arrives with the next `SessionStart` or prompt; without
+    one the box shows the folder the session was started in, and a `cd` does not
+    change it.
+11. **STOP does nothing.** There is no button to press for a session without a
+    window, so the key has nothing to act on there, and it does not stop the window
+    being followed either.
 
 ---
 

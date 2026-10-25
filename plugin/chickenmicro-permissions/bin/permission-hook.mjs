@@ -56,8 +56,16 @@ async function readStdin() {
   return Buffer.concat(chunks).toString('utf8');
 }
 
-/** What happens in a session that the daemon is told about, and nothing else. */
-const EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'Stop', 'SessionEnd']);
+/**
+ * What happens in a session that the daemon is told about, and nothing else.
+ * StopFailure is what Claude Code runs *instead of* Stop when an API error ends a
+ * turn (a rate limit, an overload): without it such a turn would read as running.
+ */
+const EVENTS = new Set(['SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure', 'SessionEnd']);
+
+/** Only these carry the name the user gave the session, and why it started. */
+const NAMED_BY = new Set(['SessionStart', 'UserPromptSubmit']);
+const MAX_TITLE_CHARS = 128;
 
 /** How long to wait for the daemon to take an event: a local socket needs no more. */
 const TELL_MS = 500;
@@ -77,21 +85,34 @@ function parse(text) {
  * Which session this is, and where it runs. Claude Code names the front-end that
  * started the session in `CLAUDE_CODE_ENTRYPOINT` (a terminal, an editor, Claude
  * Desktop...), which the daemon needs to avoid listing a Desktop conversation twice.
+ *
+ * The folder is the project the session was started in (`CLAUDE_PROJECT_DIR`), not
+ * the `cwd` of the payload: that one follows every `cd` Claude runs, and the name of
+ * the session on the box would change with it.
  */
 function originOf(payload) {
   return {
     session: str(payload.session_id),
-    cwd: str(payload.cwd),
+    cwd: str(process.env.CLAUDE_PROJECT_DIR) || str(payload.cwd),
     entrypoint: str(process.env.CLAUDE_CODE_ENTRYPOINT),
   };
 }
 
 /** The one line to send for a session event, or null when it is not one. */
 function eventLine(payload) {
-  if (!EVENTS.has(payload.hook_event_name)) return null;
+  const name = payload.hook_event_name;
+  if (!EVENTS.has(name)) return null;
   const origin = originOf(payload);
   if (origin.session === '' && origin.cwd === '') return null;
-  return `${JSON.stringify({ v: HOOK_VERSION, type: 'event', event: payload.hook_event_name, ...origin })}\n`;
+  const frame = { v: HOOK_VERSION, type: 'event', event: name, ...origin };
+  if (NAMED_BY.has(name)) {
+    // A name the user chose with --name or /rename; never the prompt or the transcript.
+    const title = str(payload.session_title).slice(0, MAX_TITLE_CHARS);
+    if (title !== '') frame.title = title;
+    const source = str(payload.source);
+    if (name === 'SessionStart' && source !== '') frame.source = source;
+  }
+  return `${JSON.stringify(frame)}\n`;
 }
 
 /** The one line to send, or null when this is not a request worth sending. */

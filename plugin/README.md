@@ -10,14 +10,16 @@ Claude Desktop's dialog gives no one-off button for — file edits above all —
 for a window nobody is looking at.
 
 It is the better way to answer, not the only one. With no plugin, no daemon, or the
-box set to **Interface**, the daemon presses the buttons in Claude's window exactly
-as it always did.
+box's **Answer via** set to *window only*, the daemon presses the buttons in Claude's
+window exactly as it always did.
 
-Four more hooks — `SessionStart`, `UserPromptSubmit`, `Stop` and `SessionEnd` — tell
-the daemon which sessions are running and whether each is working, so that a
-terminal or VS Code session is on the box as soon as it starts, not only once it asks
-for something. They send the session's id, folder and front-end and nothing else
-(never the prompt), print nothing, and never block a turn.
+Five more hooks — `SessionStart`, `UserPromptSubmit`, `Stop`, `StopFailure` (what runs
+instead of `Stop` when an API error ends a turn) and `SessionEnd` — tell the daemon
+which sessions are running and whether each is working, so that a terminal or VS Code
+session is on the box as soon as it starts, not only once it asks for something. They
+send the session's id, the project folder, the front-end and, when you gave the
+session one with `--name` or `/rename`, its name — nothing else, never the prompt —
+print nothing, and never block a turn.
 
 ## Install
 
@@ -64,10 +66,23 @@ settings at user level, so that every session has the hooks. The root
 
 ## Updating
 
-Claude Code runs the copy of the plugin it keeps under `~/.claude/plugins/cache/`,
-not this folder. Editing the files here changes nothing there until the plugin's
-`version` in [`plugin.json`](chickenmicro-permissions/.claude-plugin/plugin.json) is
-raised and Claude Code is told to fetch it:
+**The marketplace above is a folder of this repository, so Claude Code loads the
+plugin from it in place.** The files you have checked out are the installed plugin:
+a change is picked up by the next session, or by `/reload-plugins` in a running one,
+with no version to raise. (`claude plugin list --json` shows the install record, which
+can lag — an old `version` and an `installPath` under `~/.claude/plugins/cache/` —
+next to `readFromFolder` and `folderVersion`, which are the truth; `claude plugin
+details chickenmicro-permissions` lists the hooks it will run.) Two things follow:
+
+- Switching this repository to another branch, stashing, or moving the folder changes
+  or removes the hooks of every new session. On a branch from before the session
+  events there is only the permission hook, and the sessions silently vanish from
+  the box.
+- For a folder, `claude plugin marketplace update` and `claude plugin update` are not
+  needed: they refresh the install record and a cached copy that, by `readFromFolder`,
+  Claude Code does not read. If the plugin was installed from a git URL instead, it
+  *is* a copy, and it is these two commands, after raising `version` in
+  [`plugin.json`](chickenmicro-permissions/.claude-plugin/plugin.json), that replace it:
 
 ```bash
 claude plugin marketplace update chickenmicro
@@ -75,12 +90,11 @@ claude plugin update chickenmicro-permissions@chickenmicro
 ```
 
 A session that was already running keeps the hooks it started with until you run
-`/reload-plugins` in it, or restart it. The hooks of version 0.2.0 add the session
-events; 0.1.0 only answers permissions.
-
-A plugin whose marketplace was added from a local folder may be loaded from that
-folder as it is, with no copy in the cache; this one was copied (look for it under
-`~/.claude/plugins/cache/`), which is why the version has to move.
+`/reload-plugins` in it, or restart it. And **restart the daemon** too: it refuses a
+message it does not know, and a daemon from before the session events turns every
+one of them away (`[HOOK] rejected a hook request (unknown hook frame "event")`).
+To check, start a new session and run `/hooks` in it: the six events must show the
+plugin as their source.
 
 ## What it does and does not do
 
@@ -92,9 +106,11 @@ folder as it is, with no copy in the cache; this one was copied (look for it und
 - **It waits at most 120 seconds** for a permission, the `timeout` in [`hooks/hooks.json`](chickenmicro-permissions/hooks/hooks.json).
   After that Claude Code stops it and the dialog stays for you to answer. The session
   events wait for nothing, and are cut at 5 seconds.
-- **It forwards less than it is given.** The tool, the session, the directory, the
-  front-end and a trimmed copy of the input; never the prompt, the transcript path or
-  Claude's own suggestions.
+- **It forwards less than it is given.** The tool, the session, the project folder
+  (where the session started, not where Claude has since gone), the front-end and a
+  trimmed copy of the input for a permission; the name you gave a session, and why it
+  started, for the events. Never the prompt, the transcript path or Claude's own
+  suggestions.
 
 The wire format and the safety rules are in
 [`protocol/PROTOCOL.md`](../protocol/PROTOCOL.md#10-the-hook-channel-mac-local) and
@@ -111,14 +127,15 @@ Make Claude ask for something it has to ask for, and watch the daemon:
 [HOOK] approve h1 — answered through the hook
 ```
 
-That is a terminal or VS Code session with no Claude Desktop window read, tagged
-`c1`. With windows read, a hook request carries the tag of the window whose dialog
-it was matched to (`s1`), or a bare `[SESSION]` when no dialog claimed it — which
-is what a terminal or VS Code request looks like then. In Claude Desktop, a request
-that shows up as `s1.req-N`
-instead of `hN` came through the dialog, which means no hook claimed it: the plugin
-is not installed, not loaded yet, or the launcher found no `node` (the daemon's
-`node` file is missing and there is none on the `PATH`).
+That is a terminal or VS Code session, tagged with its own id (`c1`, `c2`…): it is
+listed beside Claude Desktop's windows, or alone when none is read. A request from a
+Claude Desktop conversation carries the tag of the window whose dialog it was matched
+to (`s1`), or a bare `[SESSION]` when no dialog claimed it — and so does a request
+from a session that did not say where it runs, which is what an older plugin does.
+In Claude Desktop, a request that shows up as `s1.req-N` instead of `hN` came through
+the dialog, which means no hook claimed it: the plugin is not installed, not loaded
+yet, or the launcher found no `node` (the daemon's `node` file is missing and there
+is none on the `PATH`).
 
 ## Remove it
 

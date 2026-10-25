@@ -494,16 +494,17 @@ follows four rules:
 ## 10. The hook channel (Mac-local)
 
 A Claude Code `PermissionRequest` hook can hand the daemon a request and wait for
-the box to answer it. Four more hooks — `SessionStart`, `UserPromptSubmit`, `Stop`
-and `SessionEnd` — only tell the daemon what a session is doing. This is **not**
+the box to answer it. Five more hooks — `SessionStart`, `UserPromptSubmit`, `Stop`,
+`StopFailure` and `SessionEnd` — only tell the daemon what a session is doing. This is **not**
 part of the serial protocol: it is a Unix socket on the Mac, and the box never sees
 it. The box sees only the `permission` frame the daemon builds from a request, the
 `sessions` frame it builds from what the hooks said, and answers with the usual
 `action`.
 
 **Transport.** A Unix socket, `~/.claude-remote/hook.sock` by default
-(`CLAUDE_REMOTE_SOCKET` or `--hook-socket` override it, for the hook and the daemon
-alike). The directory is `0700` and the socket `0600`: only the user can connect,
+(`--hook-socket` moves where the daemon listens; `CLAUDE_REMOTE_SOCKET` moves where
+the daemon *and* a hook look, so it has to be set to the same path in the environment
+Claude Code runs in). The directory is `0700` and the socket `0600`: only the user can connect,
 which is the whole of its authentication. NDJSON, one connection per request,
 lines of at most 65 536 bytes.
 
@@ -521,11 +522,17 @@ did not set it. The daemon uses it only to decide which sessions to list (rule 7
 it, closes, and answers nothing.
 
 ```json
-{"v":1,"type":"event","event":"UserPromptSubmit","session":"<claude session id>","cwd":"/Users/me/proj","entrypoint":"cli"}
+{"v":1,"type":"event","event":"SessionStart","session":"<claude session id>","cwd":"/Users/me/proj","entrypoint":"cli","title":"firmware","source":"startup"}
 ```
 
-`event` is one of `SessionStart`, `UserPromptSubmit`, `Stop`, `SessionEnd`. The
-prompt, the transcript and everything else Claude Code hands a hook are not sent.
+`event` is one of `SessionStart`, `UserPromptSubmit`, `Stop`, `StopFailure` (what
+Claude Code runs instead of `Stop` when an API error ends a turn) and `SessionEnd`.
+`cwd` is the project the session was started in (`CLAUDE_PROJECT_DIR`), which does not
+follow a `cd`. `title`, only on `SessionStart` and `UserPromptSubmit` and only when
+the user gave the session one (`--name`, `/rename`), is cut at 128 characters. `source`,
+only on `SessionStart`, is why it started (`startup`, `resume`, `clear`, `compact`,
+`fork`). The prompt, the transcript and everything else Claude Code hands a hook are
+not sent.
 
 **Daemon → hook**, one line, then the daemon closes:
 
@@ -562,19 +569,35 @@ so Claude's own dialog stays in charge. Nothing here ever answers for the user:
      Claude Desktop's Code tab is already one of the windows, and nothing else
      connects the two. One whose `entrypoint` is empty is left out then. Headless
      runs (`sdk-*`) are never listed.
+   - *Name.* The title the user gave the session, else the folder it was started in.
+     Names that read alike on the panel — once cut and folded — get the first
+     characters of the session id after them.
    - *State.* `waiting_permission` while a request is pending. Otherwise `thinking`
-     from a `UserPromptSubmit` to its `Stop`, then `done` for a few seconds, then
-     `idle`. A session that sent no event but requests is `idle` between them. After
-     fifteen minutes with nothing heard, `thinking` reads `idle`.
+     from a `UserPromptSubmit` to its `Stop` or `StopFailure`, then `done` for a few
+     seconds, then `idle`. A turn the user interrupts sends neither, so `thinking`
+     reads `idle` again fifteen minutes after the prompt or after the last request
+     the session made, whichever is later. A session that sent no event but requests
+     is `idle` between them. A `SessionStart` that is not a compaction (`source` of
+     `resume`, `clear`, `fork` or `startup`) starts it afresh.
    - *Leaving.* `SessionEnd` removes a session at once. One that cannot say — a
-     killed terminal — is dropped after two hours without a word.
-   - *Size.* The list holds at most `SESSIONS_MAX` (8), windows included: the
-     quietest hook session goes first, never one with a request pending.
+     killed terminal — is dropped after two hours without a word. What the daemon
+     knows is in memory and only from what hooks say: a session already open when it
+     started is unknown until its next event or request.
+   - *Size.* The list holds at most `SESSIONS_MAX` (8), windows included, and every
+     window keeps its row. Hook sessions take what is left: first those with a request
+     pending, then the one picked on the box, then the most recently heard from. The
+     daemon names, in `focus` and in a `permission` frame's `session`, only sessions
+     it listed; with no room left, a request names none. The registry itself keeps
+     eight, letting go first of a session that Desktop shows, then of the quietest.
    - *Following.* A `focus` frame naming one selects it, and picking a window
-     selects that instead. The session asking still wins while it is asking.
-     `stop` on one presses nothing: it has no button to press, and must not stop
-     the window being followed.
-   - *Mode.* With `mode: "ui"` events are ignored, like requests.
+     selects that instead; bringing another window to the front on the Mac releases
+     it, as it releases a picked window. The box describes the session that is asking
+     — except that a window the operator picked keeps the box, and that a window that
+     asks takes it from a hook session that was picked. `stop` on one presses
+     nothing, nor does a `stop` that names a session that no longer exists: it has
+     no button to press, and must not stop the window being followed.
+   - *Mode.* With `mode: "ui"` events are ignored, like requests, and the sessions
+     already known are forgotten: the box lists nothing from a hook.
 
 The daemon also leaves the path of its own `node` in a file called `node` beside the
 socket, so that a hook started with a bare `PATH` — VS Code opened from the Dock —

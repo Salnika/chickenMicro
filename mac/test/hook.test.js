@@ -96,10 +96,26 @@ describe('hook — the line a hook sends', () => {
     const event = (frame) => JSON.stringify({ v: 1, type: 'event', ...frame });
 
     it('is accepted for each thing that can happen in a session', () => {
-      for (const name of ['SessionStart', 'UserPromptSubmit', 'Stop', 'SessionEnd']) {
+      for (const name of ['SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure', 'SessionEnd']) {
         const decoded = decodeHookLine(event({ event: name, session: 's', cwd: '/x', entrypoint: 'cli' }));
-        assert.deepEqual(decoded.event, { name, session: 's', cwd: '/x', entrypoint: 'cli' });
+        assert.deepEqual(decoded.event, {
+          name, session: 's', cwd: '/x', entrypoint: 'cli', title: '', source: '',
+        });
       }
+    });
+
+    it('carries the name a user gave the session, cut rather than refused when long', () => {
+      const decoded = decodeHookLine(event({
+        event: 'SessionStart', session: 's', title: 'firmware', source: 'resume',
+      }));
+      assert.equal(decoded.event.title, 'firmware');
+      assert.equal(decoded.event.source, 'resume');
+
+      const long = decodeHookLine(event({ event: 'UserPromptSubmit', session: 's', title: 'x'.repeat(500) }));
+      assert.equal(long.event.title.length, 128);
+      const odd = decodeHookLine(event({ event: 'SessionStart', session: 's', source: 'x'.repeat(40), title: 7 }));
+      assert.equal(odd.event.source, '', 'a start source is a short word, or nothing');
+      assert.equal(odd.event.title, '', 'a title is a string, or nothing');
     });
 
     it('is refused when it names nothing it knows, or no session', () => {
@@ -1378,5 +1394,226 @@ describe('sessions beside the windows', () => {
     f.clock.now += HOOK_DONE_MS + 1;
     f.coordinator.refresh();
     assert.equal(states(f).sessions[1].state, 'idle');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// What a review of the session lifecycle found, one test for each thing.
+// ---------------------------------------------------------------------------
+
+describe('what hooks say about a session, after review', () => {
+  const SESSION = '3f2a9c1e-7b44-4d2a-9d11-aaaaaaaaaaaa';
+  const tell = (r, name, extra = {}) => r.event({
+    name, session: SESSION, cwd: '/Users/me/chickenMicro', entrypoint: 'cli', ...extra,
+  });
+  const clock = () => {
+    const time = { t: 1_000_000 };
+    return { time, registry: new HookRegistry({ now: () => time.t }) };
+  };
+  const real = (r, n) => r.event({
+    name: HookEvent.prompt, session: `real-${n}`, cwd: `/w/real${n}`, entrypoint: 'cli',
+  });
+
+  it('reads a turn that ended on an API error as over, since Stop does not run then', () => {
+    const { registry } = clock();
+    tell(registry, HookEvent.prompt);
+    assert.equal(registry.sessions()[0].state, 'thinking');
+    assert.equal(tell(registry, HookEvent.stopFailure), true);
+    assert.equal(registry.sessions()[0].state, 'idle');
+  });
+
+  it('starts afresh on a resume, a clear, a fork or a start, and not on a compaction', () => {
+    for (const source of ['resume', 'clear', 'fork', 'startup']) {
+      const { registry } = clock();
+      tell(registry, HookEvent.prompt);
+      tell(registry, HookEvent.sessionStart, { source });
+      assert.equal(registry.sessions()[0].state, 'idle', source);
+    }
+    for (const source of ['compact', '']) {
+      const { registry } = clock();
+      tell(registry, HookEvent.prompt);
+      tell(registry, HookEvent.sessionStart, { source });
+      assert.equal(registry.sessions()[0].state, 'thinking', `"${source}"`);
+    }
+  });
+
+  it('names a session by the title its user gave it, until a prompt comes without one', () => {
+    const { registry } = clock();
+    tell(registry, HookEvent.sessionStart, { title: 'firmware' });
+    assert.equal(registry.sessions()[0].name, 'firmware');
+
+    registry.submit(request('Bash', { command: 'ls' }, { session: SESSION }), new FakeChannel());
+    tell(registry, HookEvent.stop);
+    assert.equal(registry.sessions()[0].name, 'firmware', 'a request and a Stop carry no title, and keep it');
+
+    tell(registry, HookEvent.prompt);
+    assert.equal(registry.sessions()[0].name, 'chickenMicro', 'renamed to nothing, it is the folder again');
+  });
+
+  it('tells two sessions of one title apart', () => {
+    const { registry } = clock();
+    tell(registry, HookEvent.sessionStart, { title: 'docs' });
+    tell(registry, HookEvent.sessionStart, { session: 'other-1', title: 'docs' });
+    assert.deepEqual(registry.sessions().map((s) => s.name), ['docs (3f2a)', 'docs (othe)']);
+  });
+
+  it('takes a permission request for a sign that a long turn is still going', () => {
+    const { time, registry } = clock();
+    tell(registry, HookEvent.prompt);
+    time.t += HOOK_THINKING_STALE_MS - 60_000;
+    const { id } = registry.submit(request('Bash', { command: 'ls' }, { session: SESSION }), new FakeChannel());
+    registry.answer(id, 'allow');
+
+    time.t += HOOK_THINKING_STALE_MS - 60_000;
+    assert.equal(registry.sessions()[0].state, 'thinking', 'nearly 30 minutes after the prompt');
+    time.t += 120_000;
+    assert.equal(registry.sessions()[0].state, 'idle', 'and a quiet stretch ends it as before');
+  });
+
+  it('does not remember a headless request as a session', () => {
+    const { registry } = clock();
+    registry.submit(request('Bash', { command: 'ls' }, { session: 'job', entrypoint: 'sdk-cli' }),
+                    new FakeChannel());
+    assert.equal(registry.live()[0].sessionId, null);
+    for (let n = 1; n <= SESSIONS_MAX; n += 1) real(registry, n);
+    assert.equal(registry.sessions().length, SESSIONS_MAX, 'a headless run took no place from a real session');
+  });
+
+  it('lets go of a session Desktop shows before a terminal, when it has to let go', () => {
+    const { time, registry } = clock();
+    real(registry, 1);
+    time.t += 1000;
+    real(registry, 2);
+    for (let n = 1; n <= SESSIONS_MAX - 1; n += 1) {
+      time.t += 1000;
+      registry.event({ name: HookEvent.prompt, session: `desk-${n}`, cwd: `/w/desk${n}`, entrypoint: 'claude-desktop' });
+    }
+    // Nine are known: the quietest overall is a terminal, but a desktop one goes.
+    const names = registry.sessions().map((s) => s.name);
+    assert.equal(names.length, SESSIONS_MAX);
+    assert.ok(names.includes('real1') && names.includes('real2'), names.join());
+    assert.ok(!names.includes('desk1'), 'the quietest of the others went');
+  });
+
+  it('lists nothing from a hook in ui mode, and starts again from nothing after', () => {
+    const { registry } = clock();
+    real(registry, 1);
+    registry.setMode('ui');
+    assert.deepEqual(registry.sessions(), []);
+    registry.setMode('auto');
+    assert.deepEqual(registry.sessions(), [], 'what it knew before is gone, not frozen');
+    real(registry, 2);
+    assert.deepEqual(registry.sessions().map((s) => s.name), ['real2']);
+  });
+});
+
+describe('sessions beside the windows, after review', () => {
+  const tell = (f, name, extra = {}) => f.hooks.event({
+    name, session: 'sess-1', cwd: '/Users/me/docs', entrypoint: 'cli', ...extra,
+  });
+  const states = (f) => f.transport.framesOfType('sessions').at(-1);
+  const windows = (count, tree = (n) => fixtures.thinking(`win ${n}`, `${n}.`)) => fixtures.workspace(
+    Array.from({ length: count }, (_, i) => ({ name: `window ${i + 1}`, tree: tree(i + 1) })),
+  );
+
+  it('keeps the session that asks in the rows the box is given', () => {
+    const f = fixture();
+    f.source.tree = windows(3);
+    for (let n = 1; n <= 7; n += 1) {
+      f.hooks.event({ name: HookEvent.prompt, session: `sess-${n}`, cwd: `/w/p${n}`, entrypoint: 'cli' });
+    }
+    f.hooks.submit(request('Bash', { command: 'ls' }, { session: 'sess-7', cwd: '/w/p7', entrypoint: 'cli' }),
+                   new FakeChannel());
+    f.coordinator.refresh();
+
+    const list = states(f);
+    const ids = list.sessions.map((s) => s.id);
+    assert.ok(ids.length <= 8, `${ids.length} rows`);
+    assert.equal(f.shown().session, 'c7');
+    assert.ok(ids.includes('c7'), 'the asking session is one of the rows');
+    assert.ok(ids.includes(list.focus), 'so is the one described');
+    assert.equal(list.sessions.find((s) => s.id === 'c7').state, 'waiting_permission');
+  });
+
+  it('names no hook session when the windows leave no row for it', () => {
+    const f = fixture();
+    f.source.tree = windows(8);
+    f.hooks.submit(request('Bash', { command: 'ls' }, { session: 'sess-1', cwd: '/w/p1', entrypoint: 'cli' }),
+                   new FakeChannel());
+    f.coordinator.refresh();
+
+    const list = states(f);
+    assert.ok(list.sessions.every((s) => s.id.startsWith('s')), 'eight windows fill the box');
+    assert.equal(f.shown().session, undefined, 'the request names a session the box was never given');
+    assert.ok(list.sessions.some((s) => s.id === list.focus));
+  });
+
+  it('presses nothing for a STOP that names a terminal session which has just ended', () => {
+    const f = fixture();
+    f.source.tree = windows(1);
+    tell(f, HookEvent.prompt);
+    f.coordinator.refresh();
+    tell(f, HookEvent.sessionEnd);
+
+    // The key was pressed while the session was still on the box.
+    f.inbound('{"v":1,"type":"action","action":"stop","sessionId":"c1"}');
+    assert.deepEqual(f.source.pressed, [], 'the window being followed is another conversation');
+  });
+
+  it('gives the box back to the window in front once another one is brought to the front', () => {
+    const f = fixture();
+    f.source.tree = windows(2, () => fixtures.idle());
+    tell(f, HookEvent.prompt);
+    f.coordinator.refresh();
+    assert.equal(states(f).focus, 's1');
+
+    f.inbound('{"v":1,"type":"focus","sessionId":"c1"}');
+    assert.equal(states(f).focus, 'c1');
+
+    const reordered = windows(2, () => fixtures.idle());
+    reordered.children.reverse();
+    f.source.tree = reordered;
+    f.coordinator.refresh();
+    assert.equal(states(f).focus, 's2', 'the window now in front, not the session picked before');
+  });
+
+  it('shows the window that asks, though a terminal session was picked', () => {
+    const f = fixture();
+    f.source.tree = windows(1, () => fixtures.idle());
+    tell(f, HookEvent.prompt);
+    f.coordinator.refresh();
+    f.inbound('{"v":1,"type":"focus","sessionId":"c1"}');
+    assert.equal(states(f).focus, 'c1');
+
+    f.source.tree = windows(1, () => fixtures.permission('Run command', 'rm -rf build', 'a.'));
+    f.coordinator.refresh();
+    assert.equal(f.shown().session, 's1');
+    assert.equal(states(f).focus, 's1', 'the state around a question is that of the session that asked it');
+  });
+
+  it('lists a session under the title its user gave it', () => {
+    const f = fixture();
+    f.source.tree = windows(1, () => fixtures.idle());
+    tell(f, HookEvent.sessionStart, { title: 'firmware' });
+    f.coordinator.refresh();
+    assert.deepEqual(states(f).sessions.map((s) => s.name).slice(1), ['firmware']);
+  });
+
+  it('drops the terminal sessions when the box is set to the interface, and takes them again after', () => {
+    const f = fixture();
+    f.source.tree = windows(1, () => fixtures.idle());
+    tell(f, HookEvent.prompt);
+    f.coordinator.refresh();
+    assert.deepEqual(states(f).sessions.map((s) => s.id), ['s1', 'c1']);
+
+    f.inbound('{"v":1,"type":"mode","value":"ui"}');
+    f.flush();
+    assert.deepEqual(states(f).sessions.map((s) => s.id), ['s1']);
+
+    f.inbound('{"v":1,"type":"mode","value":"auto"}');
+    tell(f, HookEvent.prompt);
+    f.flush();
+    f.coordinator.refresh();
+    assert.deepEqual(states(f).sessions.map((s) => s.id), ['s1', 'c2']);
   });
 });

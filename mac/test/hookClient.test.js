@@ -29,11 +29,13 @@ const permissionRequest = (extra = {}) => ({
 });
 
 /** Starts the hook as Claude Code would: the request on stdin, the socket in the environment. */
-function runHook(stdin, socket, { entrypoint } = {}) {
+function runHook(stdin, socket, { entrypoint, projectDir } = {}) {
   const env = { ...process.env, CLAUDE_REMOTE_SOCKET: socket };
-  // The tests may themselves run inside Claude Code, which sets this.
+  // The tests may themselves run inside Claude Code, which sets these.
   delete env.CLAUDE_CODE_ENTRYPOINT;
+  delete env.CLAUDE_PROJECT_DIR;
   if (entrypoint !== undefined) env.CLAUDE_CODE_ENTRYPOINT = entrypoint;
+  if (projectDir !== undefined) env.CLAUDE_PROJECT_DIR = projectDir;
   const child = spawn(process.execPath, [SCRIPT], { env, stdio: ['pipe', 'pipe', 'pipe'] });
   let stdout = '';
   child.stdout.on('data', (chunk) => { stdout += chunk; });
@@ -204,7 +206,7 @@ describe('the hook a plugin installs', () => {
 
     it('tells the daemon, and prints nothing for Claude to read', async () => {
       await withDaemon(async ({ registry, socket }) => {
-        for (const event of ['SessionStart', 'UserPromptSubmit', 'Stop', 'SessionEnd']) {
+        for (const event of ['SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure', 'SessionEnd']) {
           const extra = event === 'UserPromptSubmit' ? { prompt: 'a prompt the box must never see' } : {};
           const { code, stdout } = await runHook(lifecycle(event, extra), socket, { entrypoint: 'cli' }).done;
           // What SessionStart and UserPromptSubmit print is added to Claude's context.
@@ -216,6 +218,17 @@ describe('the hook a plugin installs', () => {
           }
         }
         assert.deepEqual(registry.sessions(), [], 'SessionEnd was the last word');
+      });
+    });
+
+    it('tells the daemon a turn ended on an API error, which Stop does not', async () => {
+      await withDaemon(async ({ registry, socket }) => {
+        await runHook(lifecycle('UserPromptSubmit'), socket, { entrypoint: 'cli' }).done;
+        assert.deepEqual(registry.sessions().map((s) => s.state), ['thinking']);
+        const { stdout } = await runHook(lifecycle('StopFailure', { error: 'rate_limit' }), socket,
+                                         { entrypoint: 'cli' }).done;
+        assert.equal(stdout, '');
+        assert.deepEqual(registry.sessions().map((s) => s.state), ['idle']);
       });
     });
 
@@ -240,6 +253,40 @@ describe('the hook a plugin installs', () => {
         assert.equal(code, 0);
         assert.equal(stdout, '');
         assert.ok(Date.now() - started < 2000, 'a prompt must not be held up');
+      });
+    });
+
+    it('names the session after the title its user gave it, when the payload has one', async () => {
+      await withDaemon(async ({ registry, socket }) => {
+        await runHook(lifecycle('SessionStart', { session_title: 'firmware', source: 'startup' }), socket,
+                      { entrypoint: 'cli' }).done;
+        assert.deepEqual(registry.sessions().map((s) => s.name), ['firmware']);
+      });
+    });
+
+    it('names the session after the project it started in, not after where Claude has since gone', async () => {
+      await withDaemon(async ({ registry, socket }) => {
+        // `cwd` follows every `cd` Claude runs; CLAUDE_PROJECT_DIR stays put.
+        await runHook(lifecycle('Stop', { cwd: '/Users/me/docs/sub/folder' }), socket,
+                      { entrypoint: 'cli', projectDir: '/Users/me/docs' }).done;
+        assert.deepEqual(registry.sessions().map((s) => s.name), ['docs']);
+      });
+    });
+
+    it('falls back to the cwd of the payload when it is not told the project', async () => {
+      await withDaemon(async ({ registry, socket }) => {
+        await runHook(lifecycle('Stop', { cwd: '/Users/me/docs/sub' }), socket, { entrypoint: 'cli' }).done;
+        assert.deepEqual(registry.sessions().map((s) => s.name), ['sub']);
+      });
+    });
+
+    it('does not send a title with a Stop, nor anything of the prompt with a start', async () => {
+      await withDaemon(async ({ registry, socket }) => {
+        await runHook(lifecycle('SessionStart', { session_title: 'kept' }), socket, { entrypoint: 'cli' }).done;
+        await runHook(lifecycle('Stop', { session_title: 'ignored here', last_assistant_message: 'secret' }),
+                      socket, { entrypoint: 'cli' }).done;
+        assert.deepEqual(registry.sessions().map((s) => s.name), ['kept']);
+        assert.ok(!JSON.stringify(registry.sessions()).includes('secret'));
       });
     });
 

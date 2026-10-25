@@ -41,9 +41,10 @@ export const HOOK_DONE_MS = 4_000;
 
 /**
  * A session reads *thinking* from its prompt until its Stop. Interrupting a turn
- * may end it without one, and a box that says *thinking* about a session that
- * stopped long ago is worse than one that says *idle* about a long build — so
- * past this, with nothing heard, it reads idle.
+ * (Esc) ends it with no Stop at all, and a box that says *thinking* about a session
+ * that stopped long ago is worse than one that says *idle* about a long build — so
+ * past this since its prompt, or since the last permission it asked for (the one
+ * sign of life a turn gives), it reads idle.
  */
 export const HOOK_THINKING_STALE_MS = 15 * 60_000;
 
@@ -75,6 +76,9 @@ export function frontEndOf(entrypoint) {
   if (/^(sdk|local-agent|remote|claude-in-)/i.test(entrypoint)) return 'headless';
   return 'own';
 }
+
+/** What a session is called: the name its user gave it, else the folder it runs in. */
+const nameOf = (record) => (record.title !== '' ? record.title : record.folder);
 
 /**
  * A name as the box will draw it: folded to what the panel can draw, then cut to
@@ -137,11 +141,18 @@ export class HookRegistry {
 
   get mode() { return this.#mode; }
 
-  /** Set from the box's `mode` frame. Going to `ui` stands every waiting hook down. */
+  /**
+   * Set from the box's `mode` frame. Going to `ui` stands every waiting hook down
+   * and forgets the sessions: set to the interface, the box lists nothing that came
+   * from a hook, and what it knew would only go stale, since it hears nothing more.
+   */
   setMode(value) {
     if (value === this.#mode) return;
     this.#mode = value;
-    if (value === PermissionMode.ui) this.#cancelAll('the box answers through the interface');
+    if (value === PermissionMode.ui) {
+      this.#cancelAll('the box answers through the interface');
+      this.#sessions.clear();
+    }
     this.#changed();
   }
 
@@ -164,11 +175,17 @@ export class HookRegistry {
     const id = `h${this.#nextId}`;
     this.#nextId += 1;
     const summary = summarise(request);
-    const session = this.#touchSession(request, summary.sessionName, now);
+    // A headless run is answered like any other request, but it is not a session
+    // the box will ever list, so it is not remembered as one.
+    const session = frontEndOf(request.entrypoint) === 'headless'
+      ? null
+      : this.#touchSession(request, summary.sessionName, now);
+    // A request only comes in the middle of a turn: proof that it is still going.
+    if (session?.state === ClaudeState.thinking) session.stateAt = now;
     this.#entries.set(id, {
       id,
       ...summary,
-      sessionId: session.id,
+      sessionId: session?.id ?? null,
       tool: request.tool,
       session: request.session,
       cwd: request.cwd,
@@ -188,13 +205,15 @@ export class HookRegistry {
    * finished a turn, or ended. Nothing is answered, and nothing waits.
    *
    * This is how the box learns of a session that has asked for nothing. A turn
-   * reads *thinking* from its prompt to its Stop, and a session that ends is
-   * forgotten at once.
+   * reads *thinking* from its prompt to its Stop (or its StopFailure, when an API
+   * error ended it), and a session that ends is forgotten at once. A turn the user
+   * interrupts sends neither, which is what HOOK_THINKING_STALE_MS is for.
    *
-   * @param {{name: string, session: string, cwd: string, entrypoint: string}} event
+   * @param {{name: string, session: string, cwd: string, entrypoint: string,
+   *   title?: string, source?: string}} event
    * @returns {boolean} whether the event was taken
    */
-  event({ name, session, cwd, entrypoint }) {
+  event({ name, session, cwd, entrypoint, title = '', source = '' }) {
     // Set to the interface, the box does not use hooks at all.
     if (this.#mode === PermissionMode.ui) return false;
     if (frontEndOf(entrypoint) === 'headless') return false;
@@ -209,12 +228,21 @@ export class HookRegistry {
 
     const known = this.#sessions.has(session !== '' ? session : cwd);
     const record = this.#touchSession({ session, cwd, entrypoint }, sessionNameOf(cwd), now);
-    record.lifecycle = true;
+    // Only these two carry the name the user gave the session, so only these may
+    // set it, or clear it when they come without.
+    if (name === HookEvent.sessionStart || name === HookEvent.prompt) {
+      record.title = title;
+      record.name = nameOf(record);
+    }
     if (name === HookEvent.prompt) this.#setState(record, ClaudeState.thinking, now);
     else if (name === HookEvent.stop) this.#setState(record, ClaudeState.done, now);
-    // A start in a session already known is a resume or a compaction, in the
-    // middle of whatever it was doing.
-    else if (!known) this.#setState(record, ClaudeState.idle, now);
+    else if (name === HookEvent.stopFailure) this.#setState(record, ClaudeState.idle, now);
+    // A start in a session already known is, when Claude Code does not say, taken
+    // for a compaction: in the middle of whatever it was doing. A resume, a clear
+    // or a fork starts afresh.
+    else if (!known || (source !== '' && source !== 'compact')) {
+      this.#setState(record, ClaudeState.idle, now);
+    }
     this.#changed();
     return true;
   }
@@ -232,9 +260,12 @@ export class HookRegistry {
    * @param {{windowsRead?: boolean}} [options] with Claude Desktop's windows read,
    *   a session that Desktop shows itself, or that did not say where it runs, is
    *   left out: it would be listed twice. Headless runs are never listed.
-   * @returns {{id: string, name: string, pending: boolean, state: string, frontEnd: string}[]}
+   * @returns {{id: string, name: string, pending: boolean, state: string,
+   *   frontEnd: string, lastAt: number}[]} in the order the sessions were first heard
    */
   sessions(now = this.#now(), { windowsRead = false } = {}) {
+    // Set to the interface, nothing from a hook is listed.
+    if (this.#mode === PermissionMode.ui) return [];
     this.#expireSessions(now);
     const records = [...this.#sessions.values()].filter((record) => {
       const frontEnd = frontEndOf(record.entrypoint);
@@ -249,6 +280,7 @@ export class HookRegistry {
       pending: asking.has(record.id),
       state: this.#stateOf(record, now),
       frontEnd: frontEndOf(record.entrypoint),
+      lastAt: record.lastAt,
     }));
   }
 
@@ -377,13 +409,13 @@ export class HookRegistry {
       this.#nextSession += 1;
       record = {
         id,
+        folder: name,
+        title: '',
         name,
         tag: sessionId.replace(/[^A-Za-z0-9]/g, '').slice(0, TAG_CHARS),
         entrypoint: '',
-        // Whether lifecycle events have ever been heard from it. Without them the
-        // registry knows only that it asks for things, so it cannot say what it is
-        // doing between two requests.
-        lifecycle: false,
+        // Idle until an event says otherwise: a session that only asks for things
+        // is not told when it is working, so between two requests it reads idle.
         state: ClaudeState.idle,
         stateAt: now,
         lastAt: now,
@@ -391,8 +423,9 @@ export class HookRegistry {
       this.#sessions.set(key, record);
       this.#forgetBeyondTheBox(key);
     }
-    // The folder is what names it, and a session can move between them.
-    record.name = name;
+    // A session can move between folders; its title, if it has one, stays.
+    record.folder = name;
+    record.name = nameOf(record);
     record.lastAt = now;
     if (entrypoint !== '') record.entrypoint = entrypoint;
     return record;
@@ -405,7 +438,6 @@ export class HookRegistry {
 
   /** What a session is doing now, as far as the events heard from it say. */
   #stateOf(record, now) {
-    if (!record.lifecycle) return ClaudeState.idle;
     if (record.state === ClaudeState.done && now - record.stateAt > HOOK_DONE_MS) {
       return ClaudeState.idle;
     }
@@ -431,19 +463,25 @@ export class HookRegistry {
   /**
    * The box lists a handful of sessions, in the order they were first heard, and
    * cuts the list there. Left alone, sessions that went quiet fill the front of it
-   * and the one that is asking now is the one cut. So the quietest session goes
-   * first, never one that is asking and never the one just heard.
+   * and the one that is asking now is the one cut. So one goes: a session Claude
+   * Desktop already shows before a terminal or an editor (it is the one that may
+   * not be listed at all), then the quietest. Never one that is asking, never the
+   * one just heard.
    */
   #forgetBeyondTheBox(newest) {
+    const rank = (record) => (frontEndOf(record.entrypoint) === 'own' ? 1 : 0);
     while (this.#sessions.size > SESSIONS_MAX) {
       const asking = new Set(this.live().map((entry) => entry.sessionId));
-      let quietest = null;
+      let weakest = null;
       for (const [key, record] of this.#sessions) {
         if (key === newest || asking.has(record.id)) continue;
-        if (quietest === null || record.lastAt < quietest.record.lastAt) quietest = { key, record };
+        const beaten = weakest === null
+          || rank(record) < rank(weakest.record)
+          || (rank(record) === rank(weakest.record) && record.lastAt < weakest.record.lastAt);
+        if (beaten) weakest = { key, record };
       }
-      if (quietest === null) return;
-      this.#sessions.delete(quietest.key);
+      if (weakest === null) return;
+      this.#sessions.delete(weakest.key);
     }
   }
 

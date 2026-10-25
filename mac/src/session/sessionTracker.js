@@ -29,6 +29,8 @@ export class SessionTracker {
   #selectedId = null;
   /** Last window seen as frontmost-and-main on the Mac. */
   #lastMainKey = null;
+  /** Whether the latest update saw a different window come to the front. */
+  #frontChanged = false;
 
   constructor({ selectors = defaultSelectors } = {}) {
     this.#selectors = selectors;
@@ -44,7 +46,8 @@ export class SessionTracker {
       this.#entries.clear();
       this.#selectedId = null;
       this.#lastMainKey = null;
-      return { sessions: [], focusId: null, focused: null };
+      this.#frontChanged = false;
+      return { sessions: [], focusId: null, focused: null, frontChanged: false };
     }
 
     const seen = new Set();
@@ -93,6 +96,10 @@ export class SessionTracker {
       // just the window that happens to be in front on the Mac. A request
       // arriving elsewhere may move the second; it must not move the first.
       selected: this.#selectedId !== null,
+      // Bringing another window to the front releases the device's choice of a
+      // window; the coordinator releases its choice of a hook session on the same
+      // sign.
+      frontChanged: this.#frontChanged,
     };
   }
 
@@ -216,9 +223,13 @@ export class SessionTracker {
    */
   #resolveFocus(rawSessions, sessions) {
     const mainKey = rawSessions.find((raw) => raw.isMain)?.key ?? null;
+    this.#frontChanged = false;
     if (mainKey !== this.#lastMainKey) {
       this.#lastMainKey = mainKey;
-      if (mainKey !== null) this.#selectedId = null;
+      if (mainKey !== null) {
+        this.#selectedId = null;
+        this.#frontChanged = true;
+      }
     }
 
     if (this.#selectedId !== null

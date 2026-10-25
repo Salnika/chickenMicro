@@ -4,6 +4,7 @@ import {
   MAX_MISSED_PINGS,
   OTP_CLEAR_GRACE_MS,
   PING_INTERVAL_MS,
+  SESSIONS_MAX,
   TIME_SYNC_INTERVAL_MS,
 } from '../protocol/constants.js';
 import { ClaudeState, DeviceAction } from '../protocol/enums.js';
@@ -176,6 +177,8 @@ export class SessionCoordinator {
   /** Mirrors an interpreted view. */
   #mirror(view) {
     this.#view = view;
+    // A window brought to the front takes the box back from a session picked on it.
+    if (view.frontChanged) this.#hookChoice = null;
     const previous = this.#mirrored;
     const permission = this.#choosePermission(view);
     // The box asks one question at a time, and everything it shows around that
@@ -501,11 +504,27 @@ export class SessionCoordinator {
   #hookSessions(view) {
     if (this.#hooks === null) return [];
     const windowsRead = view.sessions.length > 0;
-    return this.#hooks.sessions(this.#now(), { windowsRead }).map((session) => ({
+    const sessions = this.#hooks.sessions(this.#now(), { windowsRead }).map((session) => ({
       ...session,
       // Waiting on the box beats whatever else it is doing.
       state: session.pending ? ClaudeState.waitingPermission : session.state,
     }));
+
+    // The box holds SESSIONS_MAX rows, windows included, and cuts the list at the
+    // end. What it is told about — the session that is asking, the one it describes
+    // — has to be in the rows it gets, so the list is cut here, once, and every
+    // other use of it sees the same sessions: first the ones waiting on the box,
+    // then the one the operator picked, then the most recently heard from.
+    const room = Math.max(0, SESSIONS_MAX - view.sessions.length);
+    if (sessions.length <= room) return sessions;
+    const weight = (session) => (session.pending ? 2 : session.id === this.#hookChoice ? 1 : 0);
+    const kept = new Set(
+      [...sessions]
+        .sort((left, right) => weight(right) - weight(left) || right.lastAt - left.lastAt)
+        .slice(0, room)
+        .map((session) => session.id),
+    );
+    return sessions.filter((session) => kept.has(session.id));
   }
 
   /**
@@ -518,6 +537,11 @@ export class SessionCoordinator {
    */
   #hookCurrent(hookSessions, permission, view, windowFollowed) {
     if (hookSessions.length === 0 || view.selected) return null;
+    // A window that asks takes the box, whichever session was picked: that is how
+    // it has always been, and a request must not be shown over another's state.
+    if (permission && view.sessions.some((session) => session.id === permission.sessionId)) {
+      return null;
+    }
     const current = hookSessions.find((session) => session.id === permission?.sessionId)
       ?? hookSessions.find((session) => session.id === this.#hookChoice)
       ?? (windowFollowed ? null : hookSessions.find((session) => session.pending) ?? hookSessions[0]);
@@ -530,7 +554,7 @@ export class SessionCoordinator {
 
   #logSessions(view, hookSessions = []) {
     if (view.sessions.length === 0 && hookSessions.length === 0) {
-      this.#log.info(LogTag.session, 'no Claude Desktop window open');
+      this.#log.info(LogTag.session, 'no session yet: no Claude Desktop window, and no Claude Code hook has spoken');
       return;
     }
     // Each id is painted in its own colour, so the list is a legend for every
@@ -807,9 +831,13 @@ export class SessionCoordinator {
                      `no stop control for a session that has no window`, sessionId);
       return;
     }
+    // Naming no session means the one being followed. Naming one that is gone — a
+    // window that closed, a terminal that ended while the key was pressed — means
+    // nothing: the followed window is some other conversation.
     const following = this.#mirrored?.focusId ?? this.#view?.focusId;
-    const target = sessions.find((session) => session.id === sessionId)
-      ?? sessions.find((session) => session.id === following);
+    const target = sessionId != null
+      ? sessions.find((session) => session.id === sessionId)
+      : sessions.find((session) => session.id === following);
 
     if (!target) {
       this.#log.info(LogTag.session, `no session to stop (${sessionId ?? 'none named'})`);
@@ -868,7 +896,7 @@ export class SessionCoordinator {
     this.#tracker.release();
     this.#log.info(this.#log.sessionTag(sessionId), 'now following this session', sessionId);
     if (this.#view === null) this.refresh();
-    else this.#mirror({ ...this.#view, selected: false });
+    else this.#mirror({ ...this.#view, selected: false, frontChanged: false });
     return true;
   }
 

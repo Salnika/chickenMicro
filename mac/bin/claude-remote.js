@@ -610,6 +610,7 @@ function commandHookConfig() {
       SessionStart: [{ hooks: hooks(5) }],
       UserPromptSubmit: [{ hooks: hooks(5) }],
       Stop: [{ hooks: hooks(5) }],
+      StopFailure: [{ hooks: hooks(5) }],
       SessionEnd: [{ hooks: hooks(5) }],
     },
   };
