@@ -56,6 +56,7 @@ chickenMicro/
 │   │   ├── system/              clipboard, log file, process info
 │   │   └── simulation/          fixtures and scenes
 │   └── test/                    node:test suites
+├── plugin/                      Claude Code plugin — the hook that lets the box answer
 ├── esp32/                       PlatformIO project — the firmware
 │   ├── platformio.ini
 │   ├── include/                 Config.h, DisplayModel.h, headers
@@ -581,6 +582,7 @@ claude-remote dump [--filter <text>]       print Claude's Accessibility tree
 claude-remote run [--serial <path>]        run the daemon
 claude-remote simulate [scene]             fake events, no Claude needed
 claude-remote doctor                       check permissions, port, Claude
+claude-remote hook-config                  print the Claude Code settings that install the hook
 ```
 
 `sessions` is the one to reach for when the box shows nothing: it prints, per
@@ -600,6 +602,24 @@ bound — before any hardware is involved.
 | `--no-log-file` | `run`: keep no log file |
 | `--stdout` | `simulate`: print frames instead of using serial |
 | `--no-prompt` | do not trigger the macOS Accessibility prompt |
+| `--hook-socket <path>` | `run`: where Claude Code hooks connect (default `~/.claude-remote/hook.sock`) |
+| `--no-hook` | `run`: do not listen for hooks; answer by pressing Claude's buttons only |
+
+---
+
+## Answering through a Claude Code hook
+
+Pressing the buttons in Claude's window is fragile: the first press is often
+dropped, and a release that has no one-off button for an edit leaves the box with
+nothing to press. A Claude Code `PermissionRequest` hook is handed the whole
+request instead, and what it prints closes the dialog by itself.
+
+The [`plugin/`](plugin/README.md) installs that hook. The daemon listens for it on
+a local socket, shows the request on the box, and writes ✓ or ✕ back to the hook.
+Without the plugin, without the daemon, or when it times out, the daemon presses
+the buttons as before — nothing is lost, and nothing is answered that the box did
+not answer. The box announces which way it wants permissions answered in a `mode`
+frame ([PROTOCOL.md §10](protocol/PROTOCOL.md#10-the-hook-channel-mac-local)).
 
 ---
 

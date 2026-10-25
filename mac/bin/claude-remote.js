@@ -8,6 +8,8 @@
 
 import process from 'node:process';
 import { statSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { Log, LogTag } from '../src/log.js';
 import { parseArguments } from '../src/cli/args.js';
@@ -41,6 +43,7 @@ COMMANDS
   simulate [scene]            feed fake events to the device, no Claude needed
                               scenes: ${SCENES.join(', ')}
   doctor                      check permissions, port and Claude Desktop
+  hook-config                 print the Claude Code settings that install the hook
   help                        this text
 
 OPTIONS
@@ -493,6 +496,37 @@ async function commandDoctor() {
   return problems === 0 ? 0 : 1;
 }
 
+/**
+ * The Claude Code settings that install the permission hook without the plugin.
+ *
+ * Printed, never written: Claude Code's settings are the user's, and the same
+ * block works in `~/.claude/settings.json` for every project or in a project's
+ * `.claude/settings.local.json` for one. The JSON goes to stdout alone, so it
+ * can be piped; the explanation goes to stderr.
+ */
+function commandHookConfig() {
+  const script = resolve(
+    dirname(fileURLToPath(import.meta.url)),
+    '../../plugin/chickenmicro-permissions/bin/permission-hook.mjs',
+  );
+  const settings = {
+    hooks: {
+      PermissionRequest: [{
+        matcher: '*',
+        hooks: [{ type: 'command', command: `node "${script}"`, timeout: 120 }],
+      }],
+    },
+  };
+  console.log(JSON.stringify(settings, null, 2));
+  process.stderr.write(
+    '\nMerge the "hooks" block above into ~/.claude/settings.json (every project) or a\n'
+    + "project's .claude/settings.local.json (that one). It needs `node` on the PATH Claude\n"
+    + 'Code runs hooks with. With the daemon stopped, or the box set to the interface, the\n'
+    + 'hook decides nothing and the dialog works as usual.\n',
+  );
+  return 0;
+}
+
 // --- Dispatch ---------------------------------------------------------------
 
 let status;
@@ -503,6 +537,7 @@ switch (args.command) {
   case 'run': status = await commandRun(); break;
   case 'simulate': status = commandSimulate(); break;
   case 'doctor': status = await commandDoctor(); break;
+  case 'hook-config': status = commandHookConfig(); break;
   case 'version':
   case '--version': console.log(VERSION); status = 0; break;
   case 'help':

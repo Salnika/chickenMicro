@@ -1,0 +1,10 @@
+{
+  "name": "chickenmicro-permissions",
+  "version": "0.1.0",
+  "description": "Answers Claude Code permission requests from the ChickenMicro box, and steps aside when the box or its daemon is not there.",
+  "author": {
+    "name": "salnika"
+  },
+  "repository": "https://github.com/salnika/chickenMicro",
+  "license": "MIT"
+}

@@ -1,0 +1,14 @@
+{
+  "name": "chickenmicro",
+  "description": "Plugins for the ChickenMicro desk box: answer Claude Code permission requests from its keys.",
+  "owner": {
+    "name": "salnika"
+  },
+  "plugins": [
+    {
+      "name": "chickenmicro-permissions",
+      "source": "./chickenmicro-permissions",
+      "description": "Answer Claude Code permission requests from the ChickenMicro box, with a fallback to the buttons in Claude's window."
+    }
+  ]
+}
