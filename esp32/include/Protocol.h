@@ -55,6 +55,18 @@ enum class Action : uint8_t {
     Context,
 };
 
+/// How the box wants permissions answered, sent to the Mac in a `mode` frame.
+/// See protocol/PROTOCOL.md §2 and §10.
+enum class PermissionMode : uint8_t {
+    Auto,   ///< through a Claude Code hook when one is listening, else the interface
+    Ui,     ///< by pressing the buttons in Claude's window only
+};
+
+/// The `value` a `mode` frame carries.
+constexpr const char* permissionModeName(PermissionMode mode) {
+    return mode == PermissionMode::Ui ? "ui" : "auto";
+}
+
 enum class Navigation : uint8_t {
     Up,
     Down,

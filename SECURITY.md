@@ -68,5 +68,15 @@ verdict is bound to a request id that both sides check; the Accessibility tree
 is re-read immediately before the press, so a dialog swapped between display and
 press cannot be approved by the press meant for the previous one.
 
+When a Claude Code hook is listening, the verdict goes to the hook instead of to a
+button ([PROTOCOL.md §10](protocol/PROTOCOL.md)). The same gate applies, and the
+request must still be waiting: its hook has not given up, and its dialog has not
+been answered in the app. The hook channel is a Unix socket only your user can
+reach. A process that connects can put a request on the box, but it cannot
+approve anything: only a key press answers, and the answer goes only to the
+connection that asked. A hook that is given no verdict prints no decision, so
+Claude's own dialog stays in charge, and the hook only ever allows a request
+once, never as a standing permission.
+
 If you find a sequence that defeats any of those, that is exactly the report
 this file is asking for.

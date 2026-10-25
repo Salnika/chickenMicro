@@ -10,6 +10,7 @@ import { ClaudeState, DeviceAction } from '../protocol/enums.js';
 import { decodeInbound, encode, redactForLog } from '../protocol/frames.js';
 import { systemClipboard } from '../system/clipboard.js';
 import { DEFAULT_TREE_DEPTH } from '../accessibility/axNode.js';
+import { Decision } from '../hook/wire.js';
 import { PermissionGate } from './permissionGate.js';
 import { EMPTY_SNAPSHOT, SessionTracker } from './sessionTracker.js';
 
@@ -60,6 +61,16 @@ export class SessionCoordinator {
   /** The press above, once it has been waited on in vain and is due its one retry. */
   #retryDue = null;
 
+  /**
+   * Requests handed over by Claude Code hooks, or null when the daemon runs
+   * without them. With none, every path below is the one that ran before hooks
+   * existed.
+   */
+  #hooks;
+  /** When each dialog the interpreter reads was first seen, by request id. */
+  #axSeen = new Map();
+  #refreshQueued = false;
+
   #clipboard;
   #timers;
   /** The one-time code last put on the clipboard, until it is wiped. */
@@ -78,7 +89,10 @@ export class SessionCoordinator {
     now = () => Date.now(),
     clipboard = systemClipboard,
     timers = { setTimeout, clearTimeout },
+    hooks = null,
   }) {
+    this.#hooks = hooks;
+    if (hooks !== null) hooks.onChange = () => this.#scheduleRefresh();
     this.#clipboard = clipboard;
     this.#timers = timers;
     this.#transport = transport;
@@ -180,9 +194,9 @@ export class SessionCoordinator {
         && previous.permission.request.id !== permission?.request.id) {
       const gone = previous.permission;
       this.#log.info(
-        this.#log.sessionTag(gone.sessionId),
+        this.#tagFor(gone.sessionId),
         `permission ${gone.request.id} cleared`,
-        gone.sessionId,
+        gone.sessionId ?? undefined,
       );
       this.#gate.clear();
       this.send(encode.permissionCleared(gone.request.id));
@@ -231,10 +245,10 @@ export class SessionCoordinator {
       }
       if (arrived) {
         this.#log.info(
-          this.#log.sessionTag(permission.sessionId),
+          this.#tagFor(permission.sessionId),
           `permission ${permission.request.id} (${permission.request.kind}) `
           + `in ${permission.sessionName}`,
-          permission.sessionId,
+          permission.sessionId ?? undefined,
         );
         // Only a new request is drawn: re-sending it would refresh the e-ink
         // under the operator's finger.
@@ -347,23 +361,117 @@ export class SessionCoordinator {
    * over the screen under the operator's finger.
    */
   #choosePermission(view) {
-    const pending = SessionTracker.pending(view.sessions);
+    const candidates = this.#candidates(view);
     // "No dialog" is real news, wherever the window sits. The registry keeps a
     // window's element and reads its subtree on any Space, so an empty list is
     // not a blind spot — it means the request is gone and the device must be
     // told at once. Holding it back while the window was off the active Space
     // left the box asking for a decision the user had already made in the app.
-    if (pending.length === 0) return null;
+    if (candidates.length === 0) return null;
 
     const current = this.#mirrored?.permission?.request.id;
-    const held = pending.find((session) => session.snapshot.permission.id === current);
-    const chosen = held ?? pending[0];
-    return {
-      request: chosen.snapshot.permission,
-      sessionId: chosen.id,
-      sessionName: chosen.name,
-      bindings: chosen.bindings,
-    };
+    const held = candidates.find((candidate) => candidate.request.id === current);
+    return held ?? candidates[0];
+  }
+
+  /**
+   * Every request the box could be asked about, oldest first.
+   *
+   * Two sources feed it. Dialogs read from Claude's windows are what the box has
+   * always shown. Requests handed over by a Claude Code hook are the better
+   * source when there is one: the verdict goes straight to the hook, with no
+   * button to find and press, and the hook sees requests from a window nobody is
+   * looking at.
+   *
+   * A hook request and the dialog Claude draws for it are one question, so a
+   * dialog whose text matches a request is *claimed* by it and not offered twice.
+   * A dialog no hook claims is offered as before — at once when hooks are not in
+   * play, after a short grace when they are, so a hook that is merely a moment
+   * behind is not shown up. That is the fallback: no plugin, a stopped hook or a
+   * box set to `ui` all end here.
+   */
+  #candidates(view) {
+    const now = this.#now();
+    const pending = SessionTracker.pending(view.sessions);
+    const fromDialog = (session) => ({
+      request: session.snapshot.permission,
+      sessionId: session.id,
+      sessionName: session.name,
+      bindings: session.bindings,
+    });
+
+    const hooks = this.#hooks;
+    if (hooks === null) return pending.map(fromDialog);
+
+    const seen = new Map();
+    for (const session of pending) {
+      const id = session.snapshot.permission.id;
+      seen.set(id, this.#axSeen.get(id) ?? now);
+    }
+    this.#axSeen = seen;
+
+    hooks.prune(now);
+    const claimedBy = new Map();
+    for (const session of pending) {
+      const entry = hooks.claimFor(session.snapshot.permission, now);
+      if (entry !== null) claimedBy.set(session.snapshot.permission.id, entry);
+    }
+    // A request whose dialog has gone was answered in the app.
+    hooks.cancelGone(new Set(seen.keys()));
+
+    const fromHooks = hooks.live().map((entry) => {
+      const owner = pending.find(
+        (session) => claimedBy.get(session.snapshot.permission.id) === entry,
+      );
+      return {
+        at: entry.at,
+        candidate: {
+          request: {
+            id: entry.id,
+            kind: entry.kind,
+            title: entry.title,
+            content: entry.content,
+            actions: [DeviceAction.deny, DeviceAction.approve],
+          },
+          sessionId: owner?.id ?? null,
+          sessionName: owner?.name ?? entry.sessionName,
+          bindings: new Map(),
+        },
+      };
+    });
+    const fromDialogs = pending
+      .filter((session) => {
+        const id = session.snapshot.permission.id;
+        return !claimedBy.has(id) && !hooks.holdsOff(seen.get(id), now);
+      })
+      .map((session) => ({
+        at: seen.get(session.snapshot.permission.id),
+        candidate: fromDialog(session),
+      }));
+
+    if (fromHooks.length === 0) return fromDialogs.map(({ candidate }) => candidate);
+    return [...fromHooks, ...fromDialogs]
+      .sort((left, right) => left.at - right.at)
+      .map(({ candidate }) => candidate);
+  }
+
+  /** A log tag for a request that may belong to no window the daemon can see. */
+  #tagFor(sessionId) {
+    return sessionId ? this.#log.sessionTag(sessionId) : LogTag.session;
+  }
+
+  /**
+   * Re-reads once the current call has finished. A hook arriving or leaving
+   * changes what the box should show, but it can do so from inside a mirror.
+   */
+  #scheduleRefresh() {
+    if (this.#refreshQueued) return;
+    this.#refreshQueued = true;
+    const timer = this.#timers.setTimeout(() => {
+      this.#refreshQueued = false;
+      this.refresh();
+    }, 0);
+    timer?.unref?.();
   }
 
   #logSessions(view) {
@@ -412,6 +520,13 @@ export class SessionCoordinator {
 
       case 'focus':
         this.#follow(frame.sessionId);
+        break;
+
+      case 'mode':
+        // The box's choice of how permissions are answered. Without hooks there
+        // is only one way, so the announcement is noted and nothing changes.
+        this.#log.info(LogTag.device, `mode ${frame.value}`);
+        this.#hooks?.setMode(frame.value);
         break;
 
       case 'navigation':
@@ -476,6 +591,15 @@ export class SessionCoordinator {
    * pressed — never another window's.
    */
   #performVerdict(action, requestId, { retry = false } = {}) {
+    // A request that came from a hook is answered through the hook. There is no
+    // button to find and press, so what stands in for the re-read is that the
+    // hook is still waiting: one that gave up, or whose dialog was answered in
+    // the app, is refused like any other stale verdict.
+    if (this.#hooks?.get(requestId) !== undefined) {
+      this.#performHookVerdict(action, requestId);
+      return;
+    }
+
     const view = this.#tracker.update(this.#source.readSessions(this.#treeDepth));
     const owner = view.sessions.find(
       (session) => session.snapshot.permission?.id === requestId,
@@ -520,29 +644,65 @@ export class SessionCoordinator {
   }
 
   /**
+   * Answers a request a hook is waiting on.
+   *
+   * The same single press and the same gate as a button press: the gate has
+   * already matched the id and the arming delay, and the hook must still be
+   * waiting. The answer goes only to the connection that asked.
+   */
+  #performHookVerdict(action, requestId) {
+    const decision = action === DeviceAction.approve ? Decision.allow : Decision.deny;
+    if (!this.#hooks.answer(requestId, decision, this.#now())) {
+      this.#log.warn(LogTag.hook, `refused ${action} ${requestId}: the hook is no longer waiting`);
+      this.#gate.clear();
+      this.refresh();
+      return;
+    }
+    this.#log.info(LogTag.hook, `${action} ${requestId} — answered through the hook`);
+    this.#gate.clear();
+    // The request left the waiting list with its answer: the box is told now,
+    // not at the next poll.
+    this.refresh();
+  }
+
+  /**
    * Approves every queued request at once.
    *
    * Anchored on the request shown on the device (`requestId`), which the gate
    * has already armed and matched. Each pending window's own approve button is
    * pressed — the queued ones are authorised sight-unseen, which is the whole
    * point of the gesture, so it is deliberately a separate control on the box.
+   * Requests a hook is waiting on are answered through it instead, and the
+   * dialog each stands for is not pressed a second time.
    */
   #performApproveAll(requestId) {
     const view = this.#tracker.update(this.#source.readSessions(this.#treeDepth));
     const pending = SessionTracker.pending(view.sessions);
+    const waiting = this.#hooks?.live() ?? [];
+    const claimed = new Set(waiting.map((entry) => entry.claimedBy).filter((id) => id !== null));
 
     // If the anchor is gone but a different request is up, the screen changed
     // under the user — refuse the bulk action rather than approve the wrong set.
-    const anchorVisible = pending.some((session) => session.snapshot.permission.id === requestId);
-    if (!anchorVisible && pending.length > 0) {
+    const anchorVisible = waiting.some((entry) => entry.id === requestId)
+      || pending.some((session) => session.snapshot.permission.id === requestId);
+    if (!anchorVisible && (pending.length > 0 || waiting.length > 0)) {
       this.#log.warn(LogTag.session, 'refused approve_all: Claude now shows a different request');
       this.#gate.clear();
       this.#mirror(view);
       return;
     }
 
+    let answered = 0;
+    for (const entry of waiting) {
+      if (this.#hooks.answer(entry.id, Decision.allow, this.#now())) answered += 1;
+    }
+    if (answered > 0) {
+      this.#log.info(LogTag.hook, `approve_all answered ${answered} hook request(s)`);
+    }
+
     let approved = 0;
     for (const owner of pending) {
+      if (claimed.has(owner.snapshot.permission.id)) continue;
       const ref = owner.bindings.get(DeviceAction.approve);
       if (!ref) {
         this.#log.info(this.#log.sessionTag(owner.id),
@@ -556,6 +716,7 @@ export class SessionCoordinator {
 
     this.#log.info(LogTag.session, `approve_all pressed ${approved} approve button(s)`);
     this.#gate.clear();
+    if (answered > 0) this.refresh();
   }
 
   /**

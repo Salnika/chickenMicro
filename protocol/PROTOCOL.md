@@ -241,6 +241,25 @@ Asks the Mac to report on another session. The Mac answers with a fresh
 
 A `sessionId` that is not open is logged and ignored.
 
+### `mode`
+
+Tells the Mac how the box wants permissions answered. Sent by the firmware on
+boot, whenever it sees a Mac `hello`, and each time the setting changes in the
+menu.
+
+```json
+{"v":1,"type":"mode","value":"auto"}
+```
+
+| `value` | Meaning |
+| ------- | ------- |
+| `auto`  | Answer through a Claude Code hook when one is listening, and fall back to pressing the buttons in Claude's window when none is. See §10. |
+| `ui`    | Only ever press the buttons in Claude's window. |
+
+Any other `value` is rejected and logged. A Mac with no hook channel notes the
+frame and changes nothing, and a device that never sends one is treated as
+`auto`.
+
 ### `hello`
 
 Sent by the firmware on boot and whenever it sees a Mac `hello`.
@@ -469,3 +488,54 @@ follows four rules:
    8 ASCII digits, so the box cannot put arbitrary text on the clipboard.
 4. **Codes are never logged.** Neither side writes one to a log; the Mac masks
    the `code` field even in debug traces and rejected-frame reports.
+
+---
+
+## 10. The hook channel (Mac-local)
+
+A Claude Code `PermissionRequest` hook can hand the daemon a request and wait for
+the box to answer it. This is **not** part of the serial protocol: it is a Unix
+socket on the Mac, and the box never sees it. The box sees only the `permission`
+frame the daemon builds from it, and answers with the usual `action`.
+
+**Transport.** A Unix socket, `~/.claude-remote/hook.sock` by default
+(`CLAUDE_REMOTE_SOCKET` or `--hook-socket` override it, for the hook and the daemon
+alike). The directory is `0700` and the socket `0600`: only the user can connect,
+which is the whole of its authentication. NDJSON, one connection per request,
+lines of at most 65 536 bytes.
+
+**Hook → daemon**, one line, then the hook waits:
+
+```json
+{"v":1,"type":"request","tool":"Bash","session":"<claude session id>","cwd":"/Users/me/proj","input":{"command":"git push"}}
+```
+
+**Daemon → hook**, one line, then the daemon closes:
+
+```json
+{"v":1,"type":"verdict","decision":"allow"}
+{"v":1,"type":"verdict","decision":"deny","message":"Refused from the ChickenMicro box"}
+{"v":1,"type":"cancel","reason":"answered in the app"}
+```
+
+A hook that reads `verdict` prints the matching decision to Claude Code, and one
+that reads anything else, nothing, or a closed socket exits with **no decision**,
+so Claude's own dialog stays in charge. Nothing here ever answers for the user:
+
+1. **No default answer.** A hook with no verdict prints no decision.
+2. **One answer, to the one that asked.** A verdict goes only to the connection
+   that carried the request, once.
+3. **Allow means once.** The hook never returns a permission update, so nothing
+   is remembered and no mode is changed.
+4. **The same gate.** A hook request reaches the box as a `permission` frame with
+   an id of the form `hN`, and a verdict on it passes §5 rules 1, 2, 5 and 6 like
+   any other. Rule 3 becomes: the request must still be waiting — its hook has not
+   given up, and its dialog has not been answered in the app.
+5. **Fallback.** When no hook claims a dialog Claude draws, the daemon offers the
+   dialog as it always did, after a grace of 0.6 s if hooks have recently been
+   seen. A hook that times out hands its dialog straight back.
+6. **The mode.** With `mode: "ui"` every request is answered `cancel` at once.
+
+A request and the dialog drawn for it are matched by the text they share (the
+command, the file path, the URL). A match that fails costs two entries on the box,
+never an approval on the wrong request.

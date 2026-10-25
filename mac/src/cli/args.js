@@ -7,7 +7,7 @@
  */
 const VALUE_OPTIONS = new Set([
   '--serial', '--baud', '--filter', '--depth', '--log', '--approve-delay', '--poll',
-  '--log-file', '--log-file-level',
+  '--log-file', '--log-file-level', '--hook-socket',
 ]);
 
 export function parseArguments(argv) {

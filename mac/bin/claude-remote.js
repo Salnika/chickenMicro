@@ -14,6 +14,8 @@ import { parseArguments } from '../src/cli/args.js';
 import { DEFAULT_TREE_DEPTH } from '../src/accessibility/axNode.js';
 import { UNEXPOSED_TREE_NODES, refusalMessage } from '../src/accessibility/readiness.js';
 import { LogFile, defaultLogPath } from '../src/system/logFile.js';
+import { HookRegistry } from '../src/hook/registry.js';
+import { HookServer } from '../src/hook/server.js';
 import { DEFAULT_APPROVE_DELAY_MS } from '../src/protocol/constants.js';
 import { ClaudeState } from '../src/protocol/enums.js';
 import { encode } from '../src/protocol/frames.js';
@@ -53,6 +55,10 @@ OPTIONS
                               (default: ~/Library/Logs/claude-remote/claude-remote.log)
   --log-file-level <level>    run: level for the file (default: same as --log)
   --no-log-file               run: keep no log file
+  --hook-socket <path>        run: where Claude Code hooks connect
+                              (default: ~/.claude-remote/hook.sock)
+  --no-hook                   run: do not listen for hooks; answer by pressing
+                              Claude's buttons only
   --stdout                    simulate: print frames instead of using serial
   --no-prompt                 do not open the macOS Accessibility settings pane
 
@@ -118,7 +124,7 @@ function makeTransport() {
   });
 }
 
-function makeCoordinator(transport, source) {
+function makeCoordinator(transport, source, hooks = null) {
   const approveDelayMs = args.int('--approve-delay') ?? DEFAULT_APPROVE_DELAY_MS;
   return new SessionCoordinator({
     transport,
@@ -126,7 +132,35 @@ function makeCoordinator(transport, source) {
     gate: new PermissionGate(approveDelayMs),
     log,
     treeDepth: args.int('--depth') ?? DEFAULT_TREE_DEPTH,
+    hooks,
   });
+}
+
+/**
+ * Starts listening for Claude Code hooks, or says why it cannot.
+ *
+ * A daemon that cannot take hooks is still a working daemon: it answers by
+ * pressing Claude's buttons, exactly as it did before hooks existed. So a
+ * failure here is a warning, never a reason not to run.
+ */
+async function startHooks() {
+  if (args.has('--no-hook')) {
+    log.info(LogTag.hook, 'hooks are off (--no-hook): answering through the interface only');
+    return { registry: null, server: null };
+  }
+  const registry = new HookRegistry();
+  const server = new HookServer({
+    registry,
+    log,
+    path: args.value('--hook-socket') ?? undefined,
+  });
+  try {
+    await server.start();
+    return { registry, server };
+  } catch (error) {
+    log.warn(LogTag.hook, `no hook channel (${error.message}): answering through the interface only`);
+    return { registry: null, server: null };
+  }
 }
 
 /** Runs until SIGINT/SIGTERM. */
@@ -297,7 +331,8 @@ async function commandRun() {
 
   const source = new ax.LiveAccessibilitySource({ log });
   const transport = makeTransport();
-  const coordinator = makeCoordinator(transport, source);
+  const hooks = await startHooks();
+  const coordinator = makeCoordinator(transport, source, hooks.registry);
   const watcher = new ax.ClaudeWatcher({
     source,
     log,
@@ -313,6 +348,7 @@ async function commandRun() {
   runUntilInterrupted(() => {
     log.info(LogTag.session, 'shutting down');
     watcher.stop();
+    hooks.server?.stop();
     coordinator.stop();
     source.dispose();
     log.close();

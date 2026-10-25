@@ -14,6 +14,7 @@ export const LogTag = {
   session: 'SESSION',
   sim: 'SIM',
   device: 'DEVICE',
+  hook: 'HOOK',
 };
 
 const LEVELS = { debug: 0, info: 1, warn: 2, error: 3 };

@@ -17,6 +17,7 @@ import {
   DEVICE_ACTIONS,
   LOG_LEVELS,
   NAVIGATION_ACTIONS,
+  PERMISSION_MODES,
   isClaudeState,
   requiresRequestId,
 } from './enums.js';
@@ -205,6 +206,15 @@ export function decodeInbound(text) {
       if (sessionId === undefined) return { rejected: Rejection.missingField('sessionId') };
       if (!isValidSessionId(sessionId)) return { rejected: Rejection.invalidSessionId(sessionId) };
       return { frame: { type, sessionId } };
+    }
+
+    case 'mode': {
+      const value = readString(object.value);
+      if (value === undefined) return { rejected: Rejection.missingField('value') };
+      if (!PERMISSION_MODES.includes(value)) {
+        return { rejected: Rejection.invalidEnum('value', value) };
+      }
+      return { frame: { type, value } };
     }
 
     case 'navigation': {

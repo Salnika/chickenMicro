@@ -43,6 +43,21 @@ export function requiresRequestId(action) {
     || action === DeviceAction.approveAll;
 }
 
+/**
+ * How the box answers a permission, chosen on the box and announced in a `mode`
+ * frame. See protocol/PROTOCOL.md §2 and §10.
+ *
+ * `auto` answers through the Claude Code hook when one is listening, and falls
+ * back to pressing the buttons in Claude's window when none is. `ui` only ever
+ * presses the buttons, as before the hook existed.
+ */
+export const PermissionMode = Object.freeze({
+  auto: 'auto',
+  ui: 'ui',
+});
+
+export const PERMISSION_MODES = Object.freeze(Object.values(PermissionMode));
+
 /** Joystick movement. Never destructive. */
 export const NAVIGATION_ACTIONS = Object.freeze(['up', 'down', 'left', 'right', 'select']);
 
