@@ -158,10 +158,23 @@ export class SessionCoordinator {
    * and sends only what changed. Safe to call as often as the watcher fires.
    */
   refresh() {
-    this.#mirror(this.#tracker.update(this.#source.readSessions(this.#treeDepth)));
+    this.#mirror(this.#readView());
     // After the mirror, never inside it: a retry reads the tree again and can
     // mirror what it finds.
     this.#retryPress();
+  }
+
+  /**
+   * Reads the windows. Every read goes through here, because the tracker reports a
+   * window being brought to the front once, on the read that sees it, and a read
+   * that was not looking — the one before a press — would otherwise swallow it:
+   * the session picked on the box would then keep the box from the window now in
+   * front, which is what bringing a window to the front is meant to end.
+   */
+  #readView() {
+    const view = this.#tracker.update(this.#source.readSessions(this.#treeDepth));
+    if (view.frontChanged) this.#hookChoice = null;
+    return view;
   }
 
   /**
@@ -177,8 +190,6 @@ export class SessionCoordinator {
   /** Mirrors an interpreted view. */
   #mirror(view) {
     this.#view = view;
-    // A window brought to the front takes the box back from a session picked on it.
-    if (view.frontChanged) this.#hookChoice = null;
     const previous = this.#mirrored;
     const permission = this.#choosePermission(view);
     // The box asks one question at a time, and everything it shows around that
@@ -192,7 +203,8 @@ export class SessionCoordinator {
     // A terminal or VS Code session has no window, so the box learns of it from its
     // hooks. They are listed beside the windows, and described instead of "no
     // session" when there is no window at all.
-    const hookSessions = this.#hookSessions(view);
+    const allHookSessions = this.#allHookSessions(view);
+    const hookSessions = this.#fitToBox(allHookSessions, view);
     const hookCurrent = this.#hookCurrent(hookSessions, permission, view, windowFollowed);
     const followed = hookCurrent ? null : windowFollowed;
     const snapshot = followed?.snapshot ?? hookCurrent?.snapshot ?? EMPTY_SNAPSHOT;
@@ -225,7 +237,12 @@ export class SessionCoordinator {
     ];
     const sessionsLine = encode.sessions(
       listed,
-      { focus: followed?.id ?? hookCurrent?.id ?? null, permission: permission?.request.id ?? null },
+      {
+        focus: followed?.id ?? hookCurrent?.id ?? null,
+        permission: permission?.request.id ?? null,
+        // Sessions the box has no row for are still sessions it can say are there.
+        total: view.sessions.length + allHookSessions.length,
+      },
     );
     if (sessionsLine !== previous?.sessionsLine) {
       this.#logSessions(view, hookSessions);
@@ -502,19 +519,28 @@ export class SessionCoordinator {
    * of the windows, and nothing connects the two, so it would be listed twice.
    */
   #hookSessions(view) {
+    return this.#fitToBox(this.#allHookSessions(view), view);
+  }
+
+  /** Every hook session the box could list, before the box's size is taken into account. */
+  #allHookSessions(view) {
     if (this.#hooks === null) return [];
     const windowsRead = view.sessions.length > 0;
-    const sessions = this.#hooks.sessions(this.#now(), { windowsRead }).map((session) => ({
+    return this.#hooks.sessions(this.#now(), { windowsRead }).map((session) => ({
       ...session,
       // Waiting on the box beats whatever else it is doing.
       state: session.pending ? ClaudeState.waitingPermission : session.state,
     }));
+  }
 
-    // The box holds SESSIONS_MAX rows, windows included, and cuts the list at the
-    // end. What it is told about — the session that is asking, the one it describes
-    // — has to be in the rows it gets, so the list is cut here, once, and every
-    // other use of it sees the same sessions: first the ones waiting on the box,
-    // then the one the operator picked, then the most recently heard from.
+  /**
+   * The box holds SESSIONS_MAX rows, windows included, and cuts the list at the
+   * end. What it is told about — the session that is asking, the one it describes
+   * — has to be in the rows it gets, so the list is cut here, once, and every
+   * other use of it sees the same sessions: first the ones waiting on the box,
+   * then the one the operator picked, then the most recently heard from.
+   */
+  #fitToBox(sessions, view) {
     const room = Math.max(0, SESSIONS_MAX - view.sessions.length);
     if (sessions.length <= room) return sessions;
     const weight = (session) => (session.pending ? 2 : session.id === this.#hookChoice ? 1 : 0);
@@ -680,7 +706,7 @@ export class SessionCoordinator {
       return;
     }
 
-    const view = this.#tracker.update(this.#source.readSessions(this.#treeDepth));
+    const view = this.#readView();
     const owner = view.sessions.find(
       (session) => session.snapshot.permission?.id === requestId,
     );
@@ -756,7 +782,7 @@ export class SessionCoordinator {
    * dialog each stands for is not pressed a second time.
    */
   #performApproveAll(requestId) {
-    const view = this.#tracker.update(this.#source.readSessions(this.#treeDepth));
+    const view = this.#readView();
     const pending = SessionTracker.pending(view.sessions);
     const waiting = this.#hooks?.live() ?? [];
     const claimed = new Set(waiting.map((entry) => entry.claimedBy).filter((id) => id !== null));
@@ -896,7 +922,7 @@ export class SessionCoordinator {
     this.#tracker.release();
     this.#log.info(this.#log.sessionTag(sessionId), 'now following this session', sessionId);
     if (this.#view === null) this.refresh();
-    else this.#mirror({ ...this.#view, selected: false, frontChanged: false });
+    else this.#mirror({ ...this.#view, selected: false });
     return true;
   }
 

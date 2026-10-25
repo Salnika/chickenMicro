@@ -17,9 +17,10 @@ Five more hooks — `SessionStart`, `UserPromptSubmit`, `Stop`, `StopFailure` (w
 instead of `Stop` when an API error ends a turn) and `SessionEnd` — tell the daemon
 which sessions are running and whether each is working, so that a terminal or VS Code
 session is on the box as soon as it starts, not only once it asks for something. They
-send the session's id, the project folder, the front-end and, when you gave the
-session one with `--name` or `/rename`, its name — nothing else, never the prompt —
-print nothing, and never block a turn.
+send the event, the session's id, the project folder, the front-end, why a session
+started (`SessionStart` only) and, when you gave the session one with `--name` or
+`/rename`, its name — nothing else, never the prompt — print nothing, and never block
+a turn.
 
 ## Install
 

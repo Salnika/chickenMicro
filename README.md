@@ -180,7 +180,7 @@ in the app clears from the box just as fast, wherever its window sits.
 | ------ | ----- |
 | **Connecting** | the wordmark and a stepping loader, until the Mac daemon is talking to it |
 | **Home** | the session being followed: its state, and the last thing asked of it |
-| **Sessions** | every Claude Desktop window, its state, and which one is being followed |
+| **Sessions** | every Claude Desktop window, then the terminal and VS Code sessions that report through hooks, each with its state, and which one is being followed |
 | **Message** | Claude's last reply, paginated |
 | **Menu** | device commands, opened by a long joystick press (below) |
 | **Permission** | the priority screen: what is being authorised, in which session, and how many others are queued behind it |
@@ -201,7 +201,7 @@ device-side commands live:
 | **Add OTP** | opens a temporary Wi-Fi page for adding an account; a QR code on the panel joins it |
 | **Clean the screen** | the full black → red → white pigment cycle (~45 s) |
 | **Waveform: …** | steps through the mono refresh waveforms (`gentle`, `stock`, `deep`) to compare black depth, ghosting and red creep by eye; `deep`, the default, has the strongest black and `stock` refreshes twice as fast; `kDefaultWaveform` in `Config.h` sets the one loaded at boot |
-| **Answer via: …** | flips how the box answers permissions between **hook, then window** (the default) and **window only**. Kept across reboots, and sent to the Mac in a `mode` frame — see [the hook](#answering-through-a-claude-code-hook) |
+| **Answer via: …** | flips how the box answers permissions between **hook, then window** (the default) and **window only**. In **window only** the hooks are not used at all, so terminal and VS Code sessions are not listed either. Kept across reboots, and sent to the Mac in a `mode` frame — see [the hook](#answering-through-a-claude-code-hook) |
 | **Resync with the Mac** | asks the daemon to resend the whole state |
 | **Close menu** | back to where you were |
 
@@ -673,9 +673,11 @@ session that ends leaves the list at once; one that cannot say so (a killed
 terminal) leaves after two hours. A session is named by its folder — the one it was
 started in, not where Claude has since gone — or by the name you gave it with
 `--name` or `/rename`; two that read alike get the first characters of their id.
-The box lists eight sessions at most, windows included; if more are running the
-quietest hook sessions go first, never one that is waiting, and the windows keep
-their rows. The session asking is the one the box describes, unless you picked a
+The box lists eight sessions at most, windows included. The windows keep their rows;
+the terminal and editor sessions take what is left — first those waiting, then the
+one you picked, then the most recent — and the header still counts them all. (If the
+windows leave no row, a waiting session's request still appears and can be answered,
+but it names no session.) The session asking is the one the box describes, unless you picked a
 window with the keys, which keeps the box; when none is asking, it is the one you
 picked, until you bring another window to the front on the Mac. **STOP** has
 nothing to press in a terminal or an editor.

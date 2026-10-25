@@ -70,9 +70,10 @@ firmware as paragraph breaks.
 
 ### `sessions`
 
-Every Claude Desktop window the Mac can see, and which one the `state` and
-`message` frames are about. Sent whenever the list, the focus or the active
-permission changes. See §8.
+Every session the Mac can see — each Claude Desktop window (ids `sN`) and, from the
+hook channel, each terminal or VS Code session (ids `cN`, §10 rule 7) — and which one
+the `state` and `message` frames are about. Sent whenever the list, the focus or the
+active permission changes. See §8.
 
 ```json
 {"v":1,"type":"sessions","focus":"s1","permission":"s2.req-1","total":2,"sessions":[{"id":"s1","name":"chickenMicro","state":"writing"},{"id":"s2","name":"docs","state":"waiting_permission"}]}
@@ -80,7 +81,7 @@ permission changes. See §8.
 
 | Field        | Type     | Required | Notes                                                      |
 | ------------ | -------- | -------- | ---------------------------------------------------------- |
-| `sessions`   | object[] | yes      | ≤ 8 entries; may be empty when no window is open            |
+| `sessions`   | object[] | yes      | ≤ 8 entries; may be empty when there is nothing to list     |
 | `focus`      | string   | no       | session the `state` / `message` frames describe             |
 | `permission` | string   | no       | id of the request the Mac considers active; absent for none |
 | `total`      | int      | no       | sessions the Mac has, which may exceed the listed ones      |
@@ -89,7 +90,7 @@ Each entry:
 
 | Field   | Type   | Required | Notes                                            |
 | ------- | ------ | -------- | ------------------------------------------------ |
-| `id`    | string | yes      | ≤ 16 chars, `[A-Za-z0-9._:-]`, stable per window |
+| `id`    | string | yes      | ≤ 16 chars, `[A-Za-z0-9._:-]`, stable for the life of the session |
 | `name`  | string | no       | display name, ≤ 30 chars; defaults to `id`       |
 | `state` | string | yes      | one of the states in §3                          |
 
@@ -420,7 +421,10 @@ whenever possible — unknown fields are ignored by both sides.
 
 A **session is one Claude Desktop window**. Several windows, and several copies
 of the app running side by side with their own `--user-data-dir`, are all
-sessions; the device lists them and can be pointed at any one.
+sessions; the device lists them and can be pointed at any one. A terminal or VS Code
+session, which has no window, is listed after them under a `cN` id when its hooks
+have spoken for it (§10 rule 7); it has no Accessibility element and no stop control,
+and what follows in this section is about windows.
 
 Identity is the window's Accessibility element, which is stable for as long as
 the window is open — Electron exposes no identifier, every window is titled
@@ -573,8 +577,9 @@ so Claude's own dialog stays in charge. Nothing here ever answers for the user:
      Names that read alike on the panel — once cut and folded — get the first
      characters of the session id after them.
    - *State.* `waiting_permission` while a request is pending. Otherwise `thinking`
-     from a `UserPromptSubmit` to its `Stop` or `StopFailure`, then `done` for a few
-     seconds, then `idle`. A turn the user interrupts sends neither, so `thinking`
+     from a `UserPromptSubmit` to its `Stop`, then `done` for a few seconds, then
+     `idle`; a `StopFailure` (an API error ended the turn) goes straight to `idle`,
+     with no `done`. A turn the user interrupts sends neither, so `thinking`
      reads `idle` again fifteen minutes after the prompt or after the last request
      the session made, whichever is later. A session that sent no event but requests
      is `idle` between them. A `SessionStart` that is not a compaction (`source` of
@@ -587,7 +592,8 @@ so Claude's own dialog stays in charge. Nothing here ever answers for the user:
      window keeps its row. Hook sessions take what is left: first those with a request
      pending, then the one picked on the box, then the most recently heard from. The
      daemon names, in `focus` and in a `permission` frame's `session`, only sessions
-     it listed; with no room left, a request names none. The registry itself keeps
+     it listed; with no room left, a request names none. `total` counts every session
+     the daemon has, listed or not. The registry itself keeps
      eight, letting go first of a session that Desktop shows, then of the quietest.
    - *Following.* A `focus` frame naming one selects it, and picking a window
      selects that instead; bringing another window to the front on the Mac releases

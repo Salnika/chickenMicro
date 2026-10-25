@@ -747,7 +747,12 @@ go down this list.
 8. **A session is not on the box.** Start a new session and send a prompt, and run the
    daemon with `--log debug`: each event shows as `[HOOK] SessionStart in … (front-end
    cli)`. None, and no `rejected a hook request` warning either, means the hooks did
-   not run (items 3, 5 and 7); the warning means an old daemon (item 4). A session
+   not run (items 3, 5 and 7); the warning means an old daemon (item 4). A line that
+   ends in `, ignored` means the daemon heard the hook and took no notice: usually
+   the box's **Answer via** is on *window only* (the daemon logs `[DEVICE] mode ui`
+   at boot), where no terminal or VS Code session is listed at all — set it back to
+   *hook, then window* and they reappear at their next event — or the session is a
+   headless run (`sdk-*`), or it is the end of one the daemon never knew. A session
    that was *already open* when the daemon started, or when you ran `/reload-plugins`,
    is not found before its next prompt, end of turn or permission request: nothing
    replays the past, and `claude-remote sessions` lists Claude Desktop's windows only.

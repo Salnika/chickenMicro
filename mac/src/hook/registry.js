@@ -1,6 +1,6 @@
 import { normalise } from '../accessibility/selectors.js';
 import { SESSIONS_MAX, SESSION_NAME_MAX_CHARS } from '../protocol/constants.js';
-import { toDisplayText } from '../protocol/displayText.js';
+import { toDisplayText, toSingleLine } from '../protocol/displayText.js';
 import { ClaudeState, PermissionMode } from '../protocol/enums.js';
 import { clipForWire } from '../protocol/jsonLine.js';
 import { sessionNameOf, summarise } from './summary.js';
@@ -231,7 +231,9 @@ export class HookRegistry {
     // Only these two carry the name the user gave the session, so only these may
     // set it, or clear it when they come without.
     if (name === HookEvent.sessionStart || name === HookEvent.prompt) {
-      record.title = title;
+      // Typed by a person: one line of drawable text, or nothing, so that a title
+      // the panel cannot draw leaves the folder's name in its place.
+      record.title = toSingleLine(title);
       record.name = nameOf(record);
     }
     if (name === HookEvent.prompt) this.#setState(record, ClaudeState.thinking, now);

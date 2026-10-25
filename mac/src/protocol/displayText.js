@@ -76,3 +76,14 @@ export function toDisplayText(text) {
 
   return out;
 }
+
+/**
+ * One line of drawable text: for a name someone typed (a session's title, a
+ * folder's), which must not carry a line break into the row of the panel it sits
+ * in, nor into the daemon's log. A name that is nothing the panel can draw — an
+ * emoji — comes out empty, for the caller to replace.
+ */
+export function toSingleLine(text) {
+  if (typeof text !== 'string') return text;
+  return toDisplayText(text).replace(/\s*\n+\s*/g, ' ').trim();
+}

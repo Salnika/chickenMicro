@@ -54,11 +54,12 @@ export const encode = {
    * device can reconcile against it: a `permission_cleared` lost to line noise
    * cannot leave a dead request on screen waiting for a verdict.
    */
-  sessions(sessions, { focus = null, permission = null } = {}) {
+  sessions(sessions, { focus = null, permission = null, total = null } = {}) {
     const frame = { v: VERSION, type: 'sessions' };
     if (focus != null) frame.focus = focus;
     if (permission != null) frame.permission = permission;
-    frame.total = sessions.length;
+    // How many sessions the Mac has, which may exceed the rows it sends.
+    frame.total = Math.max(total ?? 0, sessions.length);
     frame.sessions = [];
 
     for (const session of sessions.slice(0, SESSIONS_MAX)) {

@@ -1,5 +1,7 @@
 import { basename } from 'node:path';
 
+import { toSingleLine } from '../protocol/displayText.js';
+
 /** What the device is told about one hook request, and what ties it to a dialog. */
 const CONTENT_MAX_CHARS = 400;
 const SALIENT_MAX_CHARS = 80;
@@ -10,9 +12,12 @@ const str = (value) => (typeof value === 'string' ? value : '');
 /** The part of a command a dialog is sure to show: its first line. */
 const firstLine = (text) => str(text).split('\n', 1)[0].trim();
 
-/** What a session is called on the box: the folder it runs in. */
+/**
+ * What a session is called on the box: the folder it runs in, as one line of text
+ * the panel can draw. A folder with no such name — the root, an emoji — is "Claude".
+ */
 export function sessionNameOf(cwd) {
-  return cwd !== '' ? basename(cwd) : 'Claude';
+  return (cwd !== '' ? toSingleLine(basename(cwd)) : '') || 'Claude';
 }
 
 /**

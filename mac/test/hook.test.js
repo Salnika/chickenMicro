@@ -17,7 +17,7 @@ import {
   frontEndOf,
 } from '../src/hook/registry.js';
 import { HookServer } from '../src/hook/server.js';
-import { summarise } from '../src/hook/summary.js';
+import { sessionNameOf, summarise } from '../src/hook/summary.js';
 import {
   HOOK_MAX_LINE_BYTES, HookEvent, decodeHookLine, decodeHookRequest, encodeHook,
 } from '../src/hook/wire.js';
@@ -1615,5 +1615,71 @@ describe('sessions beside the windows, after review', () => {
     f.flush();
     f.coordinator.refresh();
     assert.deepEqual(states(f).sessions.map((s) => s.id), ['s1', 'c2']);
+  });
+
+  it('still says how many sessions there are when the box has no row for some', () => {
+    const f = fixture();
+    f.source.tree = windows(2, () => fixtures.idle());
+    for (let n = 1; n <= 8; n += 1) {
+      f.hooks.event({ name: HookEvent.prompt, session: `sess-${n}`, cwd: `/w/p${n}`, entrypoint: 'cli' });
+    }
+    f.coordinator.refresh();
+
+    const list = states(f);
+    assert.equal(list.sessions.length, 8, 'the box holds eight rows');
+    assert.equal(list.total, 10, 'and is told there are ten sessions');
+  });
+
+  it('releases a picked terminal session even when the window came to the front during a press', () => {
+    // The tracker reports a window being brought to the front once, on the read
+    // that sees it. If that read is the one before a press, it must not be lost.
+    const window = (n) => (n === 1 ? fixtures.permission('Run command', 'rm -rf build', 'a.') : fixtures.idle());
+    const f = fixture();
+    f.source.tree = windows(2, window);
+    tell(f, HookEvent.prompt);
+    f.coordinator.refresh();
+    f.inbound('{"v":1,"type":"focus","sessionId":"c1"}');
+    const { id } = f.shown();
+
+    const reordered = windows(2, window);
+    reordered.children.reverse();
+    f.source.tree = reordered;
+    f.arm();
+    f.inbound(action('approve', id));
+    assert.deepEqual(f.source.pressed, ['a.allow'], 'the press itself went through');
+
+    f.source.tree = (() => { const t = windows(2, () => fixtures.idle()); t.children.reverse(); return t; })();
+    f.coordinator.refresh();
+    assert.equal(states(f).focus, 's2', 'the window now in front, not the session picked before');
+  });
+});
+
+describe('what a session is called, after review', () => {
+  const tell = (r, name, extra = {}) => r.event({
+    name, session: 'sess-1', cwd: '/Users/me/chickenMicro', entrypoint: 'cli', ...extra,
+  });
+
+  it('never lets a title break a line of the panel or of the log', () => {
+    const r = new HookRegistry();
+    tell(r, HookEvent.prompt, { title: 'firmware\n2026-10-25 [HOOK] approve h9\u001b[31m' });
+    const [session] = r.sessions();
+    assert.equal(session.name, 'firmware 2026-10-25 [HOOK] approve h9?[31m');
+    assert.ok(!/[\n\u001b]/.test(session.name));
+  });
+
+  it('keeps the folder when the title is nothing the panel can draw', () => {
+    const r = new HookRegistry();
+    tell(r, HookEvent.prompt, { title: '🚀' });
+    assert.equal(r.sessions()[0].name, 'chickenMicro');
+    tell(r, HookEvent.prompt, { title: '​​' });
+    assert.equal(r.sessions()[0].name, 'chickenMicro');
+  });
+
+  it('never names a session by nothing', () => {
+    const r = new HookRegistry();
+    tell(r, HookEvent.prompt, { cwd: '/' });
+    assert.equal(r.sessions()[0].name, 'Claude');
+    assert.equal(sessionNameOf('/w/line\nbreak'), 'line break');
+    assert.equal(sessionNameOf('/w/🚀'), 'Claude');
   });
 });
